@@ -1,0 +1,52 @@
+server:
+  port: ${BOBCREW_PORT:8443}
+  ssl:
+    bundle: bobcrew
+  shutdown: graceful
+
+spring:
+  application:
+    name: bobcrew-server
+  threads:
+    virtual:
+      enabled: true
+  ssl:
+    bundle:
+      pem:
+        bobcrew:
+          keystore:
+            certificate: ${bobcrew.tls.certificate}
+            private-key: ${bobcrew.tls.private-key}
+
+bobcrew:
+  tls:
+    certificate: ${BOBCREW_TLS_CERT:file:certs/server.crt}
+    private-key: ${BOBCREW_TLS_KEY:file:certs/server.key}
+  # Directory under which every session workspace must live
+  workspace-root: ${BOBCREW_WORKSPACE_ROOT:${user.dir}/workspaces}
+  max-sessions: 8
+  # How long initialize, session/new and other short requests may take
+  request-timeout: 30s
+  # How long one prompt turn may take
+  prompt-timeout: 10m
+  # How long a permission request waits for an answer before it is rejected
+  permission-timeout: 2m
+  # Sessions with no activity for this long are closed; 0 disables the check
+  idle-timeout: 12h
+  # How many events each session keeps for clients that connect or reconnect
+  event-buffer-size: 5000
+  agent:
+    binary: ${BOB_PATH:bob}
+    arguments: ${BOB_ARGUMENTS:acp,--trust,--accept-license,--disable-mcp,--disable-subagents}
+    api-key: ${BOB_API_KEY:}
+    # false: the agent gets only HOME, LOGNAME, PATH, SHELL, TERM, USER and the API key
+    inherit-environment: false
+  auth:
+    jwt-secret-file: ${BOBCREW_JWT_SECRET_FILE:}
+    revoked-jti-file: ${BOBCREW_REVOKED_JTI_FILE:}
+    issuer: bobcrew
+    audience: bobcrew-api
+
+logging:
+  level:
+    bobcrew.agent.stderr: INFO

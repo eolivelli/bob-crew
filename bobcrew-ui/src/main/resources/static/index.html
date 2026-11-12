@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bob-crew</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<aside id="sidebar">
+  <header>
+    <h1>bob-crew</h1>
+    <span id="me"></span>
+  </header>
+  <form id="new-session">
+    <input id="new-workspace" list="workspaces" placeholder="Workspace directory" required autocomplete="off">
+    <datalist id="workspaces"></datalist>
+    <input id="new-title" placeholder="Title (optional)" maxlength="200" autocomplete="off">
+    <button type="submit">New session</button>
+  </form>
+  <ul id="sessions"></ul>
+</aside>
+
+<main>
+  <header id="session-header" hidden>
+    <div>
+      <h2 id="session-title"></h2>
+      <span id="session-meta"></span>
+    </div>
+    <div class="controls">
+      <span id="session-status" class="badge"></span>
+      <select id="session-mode" title="Mode"></select>
+      <button id="cancel" type="button">Stop</button>
+      <button id="close" type="button" class="danger">Close session</button>
+    </div>
+  </header>
+  <div id="notice" hidden></div>
+  <section id="transcript">
+    <p id="empty">Select a session or create a new one.</p>
+  </section>
+  <form id="prompt-form" hidden>
+    <textarea id="prompt" rows="3" placeholder="Ask Bob… (Enter to send, Shift+Enter for a new line)"></textarea>
+    <button type="submit">Send</button>
+  </form>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

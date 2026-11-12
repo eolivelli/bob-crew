@@ -1,0 +1,23 @@
+server:
+  # Loopback only: the UI has no login, so it must not be reachable from other machines
+  address: 127.0.0.1
+  port: ${BOBCREW_UI_PORT:8642}
+
+spring:
+  application:
+    name: bobcrew-ui
+  threads:
+    virtual:
+      enabled: true
+  config:
+    import: optional:file:${user.home}/.bobcrew/ui.properties
+
+bobcrew:
+  ui:
+    # Base URL of the bob-crew server, for example https://bob.example.com:8443
+    server-url: ${BOBCREW_SERVER_URL:}
+    # The API token, or a file that contains it
+    token: ${BOBCREW_TOKEN:}
+    token-file: ${BOBCREW_TOKEN_FILE:}
+    # PEM file with the CA (or the certificate itself) to trust for the server, when it is not publicly trusted
+    ca-file: ${BOBCREW_CA_FILE:}
