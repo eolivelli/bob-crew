@@ -17,6 +17,7 @@ public record BobCrewProperties(
         @DefaultValue("2m") Duration permissionTimeout,
         @DefaultValue("12h") Duration idleTimeout,
         @DefaultValue("5000") int eventBufferSize,
+        @DefaultValue("false") boolean fileDownloadsEnabled,
         @DefaultValue Agent agent,
         @DefaultValue Auth auth) {
 

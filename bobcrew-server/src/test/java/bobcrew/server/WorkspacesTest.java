@@ -24,7 +24,7 @@ class WorkspacesTest {
     void setUp() throws Exception {
         root = Files.createDirectory(temp.resolve("root")).toRealPath();
         workspaces = new Workspaces(new BobCrewProperties(root, 1, Duration.ofSeconds(1), Duration.ofSeconds(1),
-                Duration.ofSeconds(1), Duration.ZERO, 10, null, null));
+                Duration.ofSeconds(1), Duration.ZERO, 10, false, null, null));
     }
 
     @Test

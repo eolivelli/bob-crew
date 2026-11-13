@@ -382,6 +382,17 @@ class ServerIntegrationTest {
             .isEqualTo(404);
     }
 
+    @Test
+    void downloadingFilesWhenDisabledReturnsForbidden() throws Exception {
+        String id = createSession("dl-disabled", null).get("id").asString();
+        Path ws = directory.resolve("workspaces/dl-disabled");
+        Files.writeString(ws.resolve("hello.txt"), "hello world");
+
+        HttpResponse<String> response = send("GET", "/sessions/" + id + "/file?path=hello.txt", null, alice);
+        assertThat(response.statusCode()).isEqualTo(403);
+        assertThat(response.body()).contains("File downloads are disabled");
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private static String token(String user) {

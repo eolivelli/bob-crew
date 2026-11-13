@@ -1,8 +1,11 @@
 package bobcrew.server;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.List;
@@ -50,9 +53,12 @@ class SessionController {
 
     private final JsonMapper json;
 
-    SessionController(SessionManager sessions, JsonMapper json) {
+    private final BobCrewProperties properties;
+
+    SessionController(SessionManager sessions, JsonMapper json, BobCrewProperties properties) {
         this.sessions = sessions;
         this.json = json;
+        this.properties = properties;
     }
 
     @GetMapping("/me")
@@ -83,6 +89,73 @@ class SessionController {
     @GetMapping("/sessions/{id}")
     AgentSession.Info get(@PathVariable String id, Principal principal) {
         return sessions.get(principal.getName(), id).info();
+    }
+
+    @GetMapping("/sessions/{id}/file")
+    void downloadFile(@PathVariable String id, @RequestParam("path") String rawPath, Principal principal,
+            HttpServletResponse response) throws IOException {
+        if (!properties.fileDownloadsEnabled()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "File downloads are disabled on this server");
+        }
+        if (rawPath == null || rawPath.isBlank()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "path parameter is required");
+        }
+        AgentSession session = sessions.get(principal.getName(), id);
+        Path workspace = session.workspace();
+
+        String pathStr = rawPath.strip();
+        if (pathStr.startsWith("file://")) {
+            pathStr = pathStr.substring("file://".length());
+        }
+        if (pathStr.indexOf('\0') >= 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid path");
+        }
+
+        Path target;
+        try {
+            Path p = Path.of(pathStr);
+            if (p.isAbsolute()) {
+                target = p.normalize();
+            } else {
+                target = workspace.resolve(p).normalize();
+            }
+        } catch (RuntimeException e) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid path");
+        }
+
+        if (!Files.exists(target)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "File not found");
+        }
+
+        Path real;
+        try {
+            real = target.toRealPath();
+        } catch (IOException e) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "File not found");
+        }
+
+        if (!real.startsWith(workspace)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "The file must be inside the session workspace");
+        }
+
+        if (!Files.isRegularFile(real)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "The requested path is not a file");
+        }
+
+        String filename = real.getFileName().toString();
+        String contentType = Files.probeContentType(real);
+        if (contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        response.setStatus(HttpStatus.OK.value());
+        response.setContentType(contentType);
+        response.setHeader("Content-Disposition", "attachment; filename=\"" + filename.replace("\"", "\\\"") + "\"");
+        response.setHeader("Content-Length", String.valueOf(Files.size(real)));
+
+        try (InputStream in = Files.newInputStream(real)) {
+            in.transferTo(response.getOutputStream());
+        }
     }
 
     @DeleteMapping("/sessions/{id}")

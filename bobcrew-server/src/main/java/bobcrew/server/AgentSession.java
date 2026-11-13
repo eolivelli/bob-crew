@@ -101,6 +101,8 @@ final class AgentSession {
 
     private volatile List<Mode> modes = List.of();
 
+    private volatile boolean firstPrompt = true;
+
     AgentSession(String id, String owner, String title, Path workspace, String workspaceName,
             BobCrewProperties properties) {
         this.id = id;
@@ -227,6 +229,7 @@ final class AgentSession {
                 throw new ApiException(HttpStatus.CONFLICT, "The session is " + status.name().toLowerCase()
                         + "; it can only be cleared when idle (stop the running turn first)");
             }
+            firstPrompt = true;
             setStatus(Status.STARTING);
         }
         try {
@@ -257,18 +260,21 @@ final class AgentSession {
      * @throws ApiException with 409 if the session is not ready for a prompt
      */
     void prompt(String user, String text) {
+        boolean isFirst;
         synchronized (this) {
             if (status != Status.IDLE) {
                 throw new ApiException(HttpStatus.CONFLICT, "The session is " + status.name().toLowerCase()
                         + " and cannot take a prompt now");
             }
+            isFirst = firstPrompt;
+            firstPrompt = false;
             events.append(UiEvent.USER_PROMPT, user, Map.of("text", text));
             setStatus(Status.RUNNING);
         }
         Thread.ofVirtual().name("prompt-" + id).start(() -> {
             try {
-                AcpSchema.PromptResponse response = client.prompt(new AcpSchema.PromptRequest(acpSessionId,
-                        List.of(new AcpSchema.TextContent(text))));
+                List<AcpSchema.ContentBlock> contents = buildPromptContents(text, isFirst);
+                AcpSchema.PromptResponse response = client.prompt(new AcpSchema.PromptRequest(acpSessionId, contents));
                 events.append(UiEvent.TURN_END, null, Map.of("stopReason", response.stopReason()));
             } catch (AcpConnectionException e) {
                 // the connection to the agent is gone, so the session is too
@@ -298,6 +304,17 @@ final class AgentSession {
         } catch (RuntimeException e) {
             throw new ApiException(HttpStatus.BAD_GATEWAY, "The agent did not take the cancellation: " + rootMessage(e));
         }
+    }
+
+    private List<AcpSchema.ContentBlock> buildPromptContents(String text, boolean isFirst) {
+        if (isFirst && properties.fileDownloadsEnabled()) {
+            return List.of(
+                new AcpSchema.TextContent(
+                    "[Instructions: You can share files from the workspace with the user by replying with a file URL (for example file:///path/to/file or file://relative/path). The user interface will make it clickable for download.]\n\n"
+                    + text)
+            );
+        }
+        return List.of(new AcpSchema.TextContent(text));
     }
 
     void setMode(String modeId) {

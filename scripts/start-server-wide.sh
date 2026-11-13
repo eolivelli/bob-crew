@@ -22,6 +22,7 @@ fi
 
 export BOBCREW_JWT_SECRET_FILE="${BOBCREW_JWT_SECRET_FILE:-certs/jwt.secret}"
 export BOBCREW_AGENT_INHERIT_ENVIRONMENT=true
+export BOBCREW_FILE_DOWNLOADS_ENABLED=true
 # no --disable-mcp and no --disable-subagents
 export BOB_ARGUMENTS="acp,--trust,--auto-approve,--accept-license"
 

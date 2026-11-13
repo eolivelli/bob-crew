@@ -23,9 +23,19 @@ assert.deepStrictEqual(links('<https://example.com/a>'), [['https://example.com/
 assert.deepStrictEqual(links('a https://x.org/1\nb https://y.org/2'),
   [['https://x.org/1', 'https://x.org/1'], ['https://y.org/2', 'https://y.org/2']]);
 
-// only https
+// file:// URLs
+assert.deepStrictEqual(links('see file:///workspace/output.txt now'),
+  [['file:///workspace/output.txt', 'file:///workspace/output.txt']]);
+assert.deepStrictEqual(links('(see file://report.pdf)'),
+  [['file://report.pdf', 'file://report.pdf']]);
+assert.deepStrictEqual(links('[download](file:///workspace/data.json)'),
+  [['file:///workspace/data.json', 'file:///workspace/data.json']]);
+assert.deepStrictEqual(links('file://my-doc.docx.'),
+  [['file://my-doc.docx', 'file://my-doc.docx']]);
+
+// unsupported schemes and empty file URLs
 for (const text of ['http://example.com', 'ftp://example.com', 'javascript:alert(1)', 'www.example.com', 'example.com',
-  'data:text/html,<b>x</b>', 'file:///etc/passwd', 'HTTPS://EXAMPLE.COM', 'https://', 'https:// nothing', 'see https:///x']) {
+  'data:text/html,<b>x</b>', 'HTTPS://EXAMPLE.COM', 'https://', 'https:// nothing', 'see https:///x', 'file://', 'file:///']) {
   assert.deepStrictEqual(links(text), [], text);
 }
 // a scheme hidden inside an https URL does not matter: the whole thing is one https link

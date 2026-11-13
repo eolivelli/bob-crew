@@ -35,6 +35,8 @@ bobcrew:
   idle-timeout: 12h
   # How many events each session keeps for clients that connect or reconnect
   event-buffer-size: 5000
+  # Whether clients may download files from a session's workspace
+  file-downloads-enabled: ${BOBCREW_FILE_DOWNLOADS_ENABLED:false}
   agent:
     binary: ${BOB_PATH:bob}
     arguments: ${BOB_ARGUMENTS:acp,--trust,--accept-license,--disable-mcp,--disable-subagents}

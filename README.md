@@ -100,13 +100,14 @@ Set as environment variables, or as the Spring properties in
 | `BOBCREW_JWT_SECRET_FILE` | none, required | File with the HS256 secret, at least 32 bytes |
 | `BOBCREW_REVOKED_JTI_FILE` | none | File listing revoked token ids, one per line |
 | `BOBCREW_WORKSPACE_ROOT` | `./workspaces` | Every session works in a directory under this one |
+| `BOBCREW_FILE_DOWNLOADS_ENABLED` | `false` | Whether clients may download files from a session's workspace |
 | `BOB_PATH` | `bob` | Agent executable |
 | `BOB_ARGUMENTS` | `acp,--trust,--accept-license,--disable-mcp,--disable-subagents` | Its arguments, comma separated |
 | `BOB_API_KEY` | none | Passed to the agent as `BOB_API_KEY` and `BOBSHELL_API_KEY` |
 
 Further properties: `bobcrew.max-sessions` (8), `bobcrew.request-timeout` (30s),
 `bobcrew.prompt-timeout` (10m), `bobcrew.permission-timeout` (2m), `bobcrew.idle-timeout` (12h),
-`bobcrew.event-buffer-size` (5000), `bobcrew.agent.inherit-environment` (false).
+`bobcrew.event-buffer-size` (5000), `bobcrew.file-downloads-enabled` (false), `bobcrew.agent.inherit-environment` (false).
 
 Notes on Bob:
 
@@ -148,6 +149,7 @@ All under `/api`, with `Authorization: Bearer <token>`.
 | `POST /sessions` `{"workspace": "dir", "title": "..."}` | Creates a session and starts its agent |
 | `GET /sessions/{id}` | One session |
 | `DELETE /sessions/{id}` | Closes it and ends its agent process |
+| `GET /sessions/{id}/file?path=<path>` | Downloads a file from the session's workspace (refused with 403 if downloads are disabled) |
 | `POST /sessions/{id}/prompt` `{"text": "..."}` | Starts a turn; progress arrives as events |
 | `POST /sessions/{id}/cancel` | Stops the running turn |
 | `POST /sessions/{id}/clear` | Starts the conversation over (a fresh agent session in the same agent process, earlier events forgotten) and deletes everything in the session's workspace; the session stays open. Only when idle; refused (409) while another open session uses that directory, nested or not, and (400) for the workspace root |
