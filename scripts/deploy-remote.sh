@@ -43,7 +43,7 @@ trap close_ssh EXIT
 
 # Stops the server named in server.pid, if it is running. Arguments: remote dir.
 read -r -d '' STOP_SNIPPET <<'EOF' || true
-cd "$1"
+cd "$1" 2>/dev/null || exit 0   # first deployment: nothing to stop
 if [ -f server.pid ]; then
   pid=$(cat server.pid)
   if kill -0 "$pid" 2>/dev/null && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q bobcrew-server; then
@@ -70,7 +70,7 @@ rssh bash -l -s <<'EOF'
 command -v openssl >/dev/null || { echo "error: openssl not found on the remote machine" >&2; exit 1; }
 command -v bob >/dev/null || { echo "error: bob not found on the remote machine" >&2; exit 1; }
 command -v java >/dev/null || { echo "error: java not found on the remote machine" >&2; exit 1; }
-v=$(java -version 2>&1 | sed -n '1s/.*"\([0-9]*\).*/\1/p')
+v=$(java -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java.specification.version = \([0-9]*\).*/\1/p')
 [ "${v:-0}" -ge 21 ] || { echo "error: Java 21 or newer is needed on the remote machine (found ${v:-none})" >&2; exit 1; }
 EOF
 
