@@ -1,5 +1,13 @@
 # bob-crew
 
+> [!WARNING]
+> **For testing purposes only. Not meant to be used in production.**
+>
+> bob-crew is an experimental extension for IBM Bob. It has no database, keeps sessions in memory,
+> has no user management, and lets every signed-in user use every session. The wide-permission
+> scripts run agents with `--trust` and `--auto-approve`. Do not run it on a machine that holds
+> data or credentials you cannot afford to expose, and do not put it on a public network.
+
 Run many [IBM Bob Shell](https://bob.ibm.com/docs/shell/features/acp) sessions on a server and drive
 them from a browser.
 

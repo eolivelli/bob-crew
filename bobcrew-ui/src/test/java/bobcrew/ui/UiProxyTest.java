@@ -149,6 +149,15 @@ class UiProxyTest {
     }
 
     @Test
+    void servesTheFavicon() throws Exception {
+        assertThat(get("/").body()).contains("<link rel=\"icon\" href=\"icon.svg\"").contains("href=\"favicon.ico\"")
+            .contains("href=\"apple-touch-icon.png\"");
+        for (String icon : new String[] {"/icon.svg", "/favicon.ico", "/apple-touch-icon.png"}) {
+            assertThat(get(icon).statusCode()).as(icon).isEqualTo(200);
+        }
+    }
+
+    @Test
     void servesTheTranscriptExportAndLinks() throws Exception {
         // the behaviour itself is checked by src/test/js/transcript-export.test.js and links.test.js
         assertThat(get("/").body()).contains("id=\"export\"").contains("id=\"clear\"").contains("src=\"transcript-export.js\"")
