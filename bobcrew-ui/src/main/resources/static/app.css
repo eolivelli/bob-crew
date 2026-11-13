@@ -107,6 +107,7 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height:
 .msg.thought { align-self: flex-start; background: var(--thought); color: var(--muted); font-size: 13px; font-style: italic; }
 .msg.error { align-self: flex-start; border: 1px solid var(--bad); color: var(--bad); }
 .msg .who { display: block; font-size: 11px; color: var(--muted); font-style: normal; }
+.msg a, .card a { color: var(--accent); }
 
 .card { align-self: flex-start; max-width: min(820px, 92%); border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 8px 12px; font-size: 14px; }
 .card .head { display: flex; gap: 8px; align-items: center; }

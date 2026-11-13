@@ -54,6 +54,46 @@ class WorkspacesTest {
     }
 
     @Test
+    void wipeDeletesEverythingInsideButKeepsTheDirectory() throws Exception {
+        Path workspace = workspaces.resolve("project");
+        Files.writeString(workspace.resolve("a.txt"), "a");
+        Files.writeString(workspace.resolve(".hidden"), "h");
+        Files.createDirectories(workspace.resolve("src/deep/er"));
+        Files.writeString(workspace.resolve("src/deep/er/b.txt"), "b");
+        Path outside = Files.createDirectory(temp.resolve("outside"));
+        Files.writeString(outside.resolve("precious.txt"), "keep me");
+        Files.createSymbolicLink(workspace.resolve("link"), outside);
+        Path sibling = workspaces.resolve("other");
+        Files.writeString(sibling.resolve("c.txt"), "c");
+
+        workspaces.wipe(workspace);
+
+        assertThat(workspace).isDirectory();
+        try (var children = Files.list(workspace)) {
+            assertThat(children).isEmpty();
+        }
+        assertThat(outside.resolve("precious.txt")).as("a link is removed, not followed").hasContent("keep me");
+        assertThat(sibling.resolve("c.txt")).exists();
+    }
+
+    @Test
+    void wipeRefusesTheRootAndADirectoryThatWasReplaced() throws Exception {
+        Files.writeString(workspaces.resolve("project").resolve("a.txt"), "a");
+        assertThatThrownBy(() -> workspaces.wipe(root)).isInstanceOf(ApiException.class)
+            .hasMessageContaining("root");
+        assertThat(root.resolve("project/a.txt")).exists();
+
+        // the directory is replaced by a link to another workspace
+        Path workspace = workspaces.resolve("moved");
+        Path other = workspaces.resolve("other");
+        Files.writeString(other.resolve("c.txt"), "c");
+        Files.delete(workspace);
+        Files.createSymbolicLink(workspace, other);
+        assertThatThrownBy(() -> workspaces.wipe(workspace)).isInstanceOf(ApiException.class);
+        assertThat(other.resolve("c.txt")).exists();
+    }
+
+    @Test
     void refusesAFile() throws Exception {
         Files.writeString(root.resolve("file.txt"), "x");
         assertThatThrownBy(() -> workspaces.resolve("file.txt")).isInstanceOf(ApiException.class);

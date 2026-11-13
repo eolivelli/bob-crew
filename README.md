@@ -71,6 +71,15 @@ then start the UI and open <http://127.0.0.1:8642>:
 java -jar bobcrew-ui/target/bobcrew-ui-0.1.0-SNAPSHOT.jar
 ```
 
+## Exporting a session
+
+The **Export transcript** button in a session's header downloads the whole session as one
+standalone HTML page, gzipped (`<title>-<date>.html.gz`; `gunzip` it, then open it). It is built in
+the browser from the events the page has received, so it contains what the server still holds: the
+last `bobcrew.event-buffer-size` events (5000 by default), and the page says so when the start of a
+session is missing. The file has no scripts and carries a Content-Security-Policy that blocks all
+network access.
+
 ## Server configuration
 
 Set as environment variables, or as the Spring properties in
@@ -133,13 +142,14 @@ All under `/api`, with `Authorization: Bearer <token>`.
 | `DELETE /sessions/{id}` | Closes it and ends its agent process |
 | `POST /sessions/{id}/prompt` `{"text": "..."}` | Starts a turn; progress arrives as events |
 | `POST /sessions/{id}/cancel` | Stops the running turn |
+| `POST /sessions/{id}/clear` | Starts the conversation over (a fresh agent session in the same agent process, earlier events forgotten) and deletes everything in the session's workspace; the session stays open. Only when idle; refused (409) while another open session uses that directory, nested or not, and (400) for the workspace root |
 | `POST /sessions/{id}/mode` `{"modeId": "..."}` | Switches the agent's mode |
 | `POST /sessions/{id}/permissions/{toolCallId}` `{"optionId": "..."}` | Answers a permission request |
 | `GET /sessions/{id}/events?after=<seq>` | Server-Sent Events: the session's events after `seq`, then new ones |
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,
-`permission_resolved`, `turn_end`, `status`, `error`. The server keeps the last 5000 events of a
+`permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here). The server keeps the last 5000 events of a
 session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss nothing.
 
 ## Not in this version

@@ -53,6 +53,15 @@ final class EventLog {
         return event;
     }
 
+    /**
+     * Forgets the kept events, as when the oldest ones are pushed out, but all at once. Numbering
+     * goes on, so a client that reconnects with an old number simply gets what is recorded after
+     * this; subscribers keep whatever was already queued for them.
+     */
+    synchronized void discard() {
+        events.clear();
+    }
+
     synchronized long lastSeq() {
         return lastSeq;
     }

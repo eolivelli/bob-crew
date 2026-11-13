@@ -11,7 +11,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * @param time when the server recorded it
  * @param type what happened: {@code update} (an ACP session update, as the agent sent it),
  * {@code user_prompt}, {@code permission_request}, {@code permission_resolved}, {@code turn_end},
- * {@code status} or {@code error}
+ * {@code status}, {@code error} or {@code cleared} (the conversation was started over; every
+ * event before it is gone from the log, and clients show an empty transcript from here)
  * @param user who caused it, for events caused by a user
  * @param data the details, depending on the type
  */
@@ -31,4 +32,6 @@ public record UiEvent(long seq, Instant time, String type, String user, Object d
     public static final String STATUS = "status";
 
     public static final String ERROR = "error";
+
+    public static final String CLEARED = "cleared";
 }

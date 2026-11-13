@@ -39,6 +39,24 @@ class EventLogTest {
     }
 
     @Test
+    void discardForgetsKeptEventsButNumberingGoesOn() throws Exception {
+        EventLog log = new EventLog(10);
+        log.append("a", null, null);
+        EventLog.Subscription before = log.subscribe(0);
+        log.append("b", null, null);
+        log.discard();
+        log.append("c", null, null);
+        // what was already queued is still delivered, in order
+        assertThat(drain(before)).containsExactly(1L, 2L, 3L);
+        // a new or reconnecting client only gets what was recorded after the discard
+        try (EventLog.Subscription fresh = log.subscribe(0); EventLog.Subscription old = log.subscribe(1)) {
+            assertThat(drain(fresh)).containsExactly(3L);
+            assertThat(drain(old)).containsExactly(3L);
+        }
+        assertThat(log.lastSeq()).isEqualTo(3);
+    }
+
+    @Test
     void closingEndsSubscriptionsAfterTheirLastEvent() throws Exception {
         EventLog log = new EventLog(10);
         log.append("a", null, null);

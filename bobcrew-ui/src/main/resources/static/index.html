@@ -30,7 +30,9 @@
     <div class="controls">
       <span id="session-status" class="badge"></span>
       <select id="session-mode" title="Mode"></select>
+      <button id="export" type="button" title="Download the whole session as a gzipped HTML file">Export transcript</button>
       <button id="cancel" type="button">Stop</button>
+      <button id="clear" type="button" class="danger" title="Start the conversation over and delete everything in the workspace; the session stays open">Clear</button>
       <button id="close" type="button" class="danger">Close session</button>
     </div>
   </header>
@@ -43,6 +45,8 @@
     <button type="submit">Send</button>
   </form>
 </main>
+<script src="links.js"></script>
+<script src="transcript-export.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

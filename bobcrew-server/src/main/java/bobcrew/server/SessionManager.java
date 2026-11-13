@@ -99,6 +99,30 @@ public class SessionManager {
         log.info("Session {} closed by {}", id, user);
     }
 
+    /**
+     * Starts the session's conversation over and deletes everything in its workspace; the session
+     * stays open. Refused while another open session uses the same directory (or one inside or
+     * around it), because that session's files would go too.
+     * @throws ApiException 400 for the workspace root, 409 if busy or shared
+     */
+    AgentSession.Info clear(String user, String id) {
+        AgentSession session = get(user, id);
+        Path workspace = session.workspace();
+        if (workspace.equals(workspaces.root())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "The workspace root itself cannot be wiped");
+        }
+        for (AgentSession other : sessions.values()) {
+            if (other != session && isActive(other) && (other.workspace().startsWith(workspace)
+                    || workspace.startsWith(other.workspace()))) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "Another open session uses this workspace; close it first");
+            }
+        }
+        AgentSession.Info info = session.clear(user, () -> workspaces.wipe(workspace));
+        log.info("Session {} cleared by {}; workspace {} wiped", id, user, info.workspace());
+        return info;
+    }
+
     List<String> workspaces() {
         return workspaces.list();
     }

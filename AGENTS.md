@@ -27,6 +27,9 @@ mvn test -pl bobcrew-server -am               # one module and what it needs
 mvn test -pl bobcrew-server -Dtest=ServerIntegrationTest#aUserAnswersAPermissionRequest
 ```
 
+The UI's JavaScript tests (`bobcrew-ui/src/test/js`) run in the same `test` phase through
+exec-maven-plugin, so `node` (18 or newer) must be on the PATH; `-DskipTests` skips them.
+
 Tests never need Bob or an API key: they start `bobcrew-fake-agent` as the agent process. Do not
 add a test that requires the real `bob` binary or network access.
 
@@ -67,7 +70,9 @@ To try a change by hand, follow "Quick start" in the README with the fake agent
 | `ProxyController` | Forwards `/api/**` to the server with the token; streams responses through. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
 | `ServerConnection` | Server URL, token, and the HTTP client with the trusted CA. |
-| `static/app.js` | The whole front end: plain JavaScript, no build step, no dependencies. |
+| `static/app.js` | The front end: plain JavaScript, no build step, no dependencies. |
+| `static/links.js` | Makes `https://` links in agent and user text clickable (https only, built as DOM elements, never HTML). Tested with `node bobcrew-ui/src/test/js/links.test.js` (Maven runs it too). |
+| `static/transcript-export.js` | Content-to-text helpers and the transcript export (events to a gzipped HTML page). Builds HTML as a string, so all text goes through `esc()`. Tested with `node bobcrew-ui/src/test/js/transcript-export.test.js` (Maven runs it too). |
 
 ## How a prompt flows
 
@@ -101,7 +106,8 @@ To try a change by hand, follow "Quick start" in the README with the fake agent
   with `SseEmitter`. This relies on virtual threads being enabled. `EventLog.close()` must wake
   waiting readers, otherwise shutdown waits for the keepalive interval.
 - **Event sequence numbers** are contiguous per session and clients resume by them. Never mutate
-  or reorder events after `append`; add new event types rather than changing the shape of
+  or reorder events after `append` (the one exception is `EventLog.discard()`, used by clearing a
+  session, which drops all kept events and goes on numbering); add new event types rather than changing the shape of
   existing ones, and update `app.js` and the README table when you do.
 - **Status changes** go through `AgentSession.setStatus`, which also emits the `status` event the
   UI depends on.

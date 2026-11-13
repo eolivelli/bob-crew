@@ -13,6 +13,11 @@
     <name>bob-crew UI</name>
     <description>Local web UI: serves the pages on the loopback interface and forwards API calls with the user's token</description>
 
+    <properties>
+        <!-- -DskipTests skips the JavaScript tests too -->
+        <skipTests>false</skipTests>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -31,6 +36,43 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <!-- The JavaScript tests need Node 18 or newer on the PATH; they use no npm packages. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.7.0</version>
+                <configuration>
+                    <executable>node</executable>
+                    <skip>${skipTests}</skip>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>js-test-links</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <arguments>
+                                <argument>${project.basedir}/src/test/js/links.test.js</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>js-test-transcript-export</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <arguments>
+                                <argument>${project.basedir}/src/test/js/transcript-export.test.js</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

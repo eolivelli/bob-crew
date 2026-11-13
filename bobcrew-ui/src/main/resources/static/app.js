@@ -6,9 +6,11 @@
 const $ = (id) => document.getElementById(id);
 
 const state = {
+  user: '',             // who this UI is signed in as
   sessions: [],
   current: null,        // id of the selected session
   source: null,         // its EventSource
+  events: [],           // every event received for it, for the transcript export
   toolCalls: new Map(), // toolCallId -> card elements
   permissions: new Map(),
   streaming: null,      // {kind, body}: the message that chunks are appended to
@@ -102,6 +104,7 @@ function setStatus(status) {
   $('prompt-form').hidden = !open;
   $('prompt-form').querySelector('button').disabled = status !== 'IDLE';
   $('cancel').disabled = status !== 'RUNNING';
+  $('clear').disabled = status !== 'IDLE';
   $('session-mode').disabled = !open;
 }
 
@@ -112,6 +115,7 @@ function select(id) {
   state.current = id;
   // keeps the selection across a reload, and makes the session linkable
   history.replaceState(null, '', '#' + id);
+  state.events = [];
   state.toolCalls.clear();
   state.permissions.clear();
   state.streaming = null;
@@ -126,7 +130,9 @@ function select(id) {
   state.source = source;
   source.onmessage = (message) => {
     if (state.source !== source) return;
-    render(JSON.parse(message.data));
+    const event = JSON.parse(message.data);
+    state.events.push(event);
+    render(event);
   };
   source.addEventListener('end', () => {
     source.close();
@@ -142,22 +148,31 @@ function add(node) {
   return node;
 }
 
-function textOf(content) {
-  if (!content) return '';
-  if (content.type === 'text') return content.text || '';
-  if (content.type === 'resource_link') return `[${content.name || content.uri || 'resource'}]`;
-  return `[${content.type || 'content'}]`;
+// An element whose text has its https links made clickable.
+function linked(tag, className, text) {
+  const node = el(tag, className);
+  node.append(...linkify(text));
+  return node;
 }
 
+// A link can arrive split across chunks, so the message is rebuilt from its whole text; doing it
+// at most every 30 ms keeps a long reply, or a replay of many chunks, cheap.
 function appendChunk(kind, text) {
   if (!state.streaming || state.streaming.kind !== kind || !state.streaming.body.isConnected) {
     const message = add(el('div', 'msg ' + kind));
-    state.streaming = { kind, body: message };
+    state.streaming = { kind, body: message, text: '', queued: false };
   }
-  const transcript = $('transcript');
-  const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
-  state.streaming.body.append(document.createTextNode(text));
-  if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+  const streaming = state.streaming;
+  streaming.text += text;
+  if (streaming.queued) return;
+  streaming.queued = true;
+  setTimeout(() => {
+    streaming.queued = false;
+    const transcript = $('transcript');
+    const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+    streaming.body.replaceChildren(...linkify(streaming.text));
+    if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+  }, 30);
 }
 
 function toolCard(id) {
@@ -185,13 +200,9 @@ function updateTool(update) {
     card.status.textContent = update.status.replace('_', ' ');
     card.status.className = 'status status-' + update.status;
   }
-  if (update.content && update.content.length) {
-    const parts = update.content.map((item) => {
-      if (item.type === 'diff') return `--- ${item.path}\n${item.newText || ''}`;
-      if (item.type === 'terminal') return `[terminal ${item.terminalId}]`;
-      return textOf(item.content);
-    });
-    card.output.textContent = parts.join('\n');
+  const output = toolOutput(update);
+  if (output !== null) {
+    card.output.replaceChildren(...linkify(output));
     card.output.hidden = false;
   }
 }
@@ -203,7 +214,7 @@ function renderPlan(update) {
   }
   const list = el('ol');
   for (const entry of update.entries || []) {
-    list.append(el('li', entry.status || '', entry.content));
+    list.append(linked('li', entry.status || '', entry.content));
   }
   state.plan.replaceChildren(el('div', 'title', 'Plan'), list);
 }
@@ -253,7 +264,7 @@ function render(event) {
       state.streaming = null;
       state.plan = null;
       const message = add(el('div', 'msg user'));
-      message.append(el('span', 'who', event.user || ''), document.createTextNode(data.text || ''));
+      message.append(el('span', 'who', event.user || ''), ...linkify(data.text || ''));
       break;
     }
     case 'update':
@@ -267,6 +278,16 @@ function render(event) {
         default: break; // updates this UI does not show
       }
       break;
+    case 'cleared':
+      // everything before it is gone from the server's log too
+      state.events = [event];
+      state.toolCalls.clear();
+      state.permissions.clear();
+      state.streaming = null;
+      state.plan = null;
+      $('transcript').replaceChildren();
+      add(el('div', 'divider', 'session cleared' + (event.user ? ' by ' + event.user : '')));
+      break;
     case 'permission_request': renderPermission(data); break;
     case 'permission_resolved': resolvePermission(event); break;
     case 'turn_end':
@@ -278,7 +299,7 @@ function render(event) {
       break;
     case 'error':
       state.streaming = null;
-      add(el('div', 'msg error', data.message || 'Error'));
+      add(linked('div', 'msg error', data.message || 'Error'));
       break;
     default: break;
   }
@@ -339,6 +360,33 @@ $('session-mode').addEventListener('change', async (change) => {
   }
 });
 
+$('export').addEventListener('click', async () => {
+  const session = state.sessions.find((s) => s.id === state.current);
+  if (!session) return;
+  if (!state.events.length) {
+    notify('Nothing to export yet.');
+    return;
+  }
+  try {
+    await exportTranscript(session, state.events, state.user);
+  } catch (e) {
+    notify('Cannot export the transcript: ' + e.message);
+  }
+});
+
+$('clear').addEventListener('click', async () => {
+  const session = state.sessions.find((s) => s.id === state.current);
+  if (!session) return;
+  if (!window.confirm(`Clear this session? Everything in the workspace "${session.workspace}" will be deleted `
+      + 'and the conversation will start over. This cannot be undone. The session stays open.')) return;
+  try {
+    await api('POST', `/sessions/${state.current}/clear`);
+    refreshSessions(); // the agent's modes start over
+  } catch (e) {
+    notify(e.message);
+  }
+});
+
 $('close').addEventListener('click', async () => {
   if (!state.current || !window.confirm('Close this session and stop its agent?')) return;
   try {
@@ -358,6 +406,7 @@ $('close').addEventListener('click', async () => {
 (async function start() {
   try {
     const me = await api('GET', '/me');
+    state.user = me.user;
     $('me').textContent = me.user;
   } catch (e) {
     notify(e.message);

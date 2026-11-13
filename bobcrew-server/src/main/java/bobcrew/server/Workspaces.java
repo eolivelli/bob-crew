@@ -2,11 +2,16 @@ package bobcrew.server;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.List;
 import java.util.stream.Stream;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
@@ -17,6 +22,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 class Workspaces {
+
+    private static final Logger log = LoggerFactory.getLogger(Workspaces.class);
 
     private final Path root;
 
@@ -80,6 +87,47 @@ class Workspaces {
             return real;
         } catch (IOException e) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Cannot use this workspace: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Deletes everything inside a workspace directory, hidden files included, and keeps the
+     * directory itself. Symbolic links are removed, never followed. The directory must still be
+     * the one {@link #resolve} returned: if something replaced it (with a link, say), nothing is
+     * deleted.
+     * @throws ApiException with 400 for the root itself, 409 if the directory is no longer where it was
+     */
+    void wipe(Path workspace) {
+        try {
+            Path real = workspace.toRealPath();
+            if (!real.equals(workspace) || !real.startsWith(root)) {
+                throw new ApiException(HttpStatus.CONFLICT, "The workspace directory has changed; nothing was deleted");
+            }
+            if (real.equals(root)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "The workspace root itself cannot be wiped");
+            }
+            Files.walkFileTree(real, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
+                    Files.delete(file);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path directory, IOException failure) throws IOException {
+                    if (failure != null) {
+                        throw failure;
+                    }
+                    if (!directory.equals(real)) {
+                        Files.delete(directory);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            log.warn("Wiping workspace {} failed: {}", workspace, e.toString());
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "The workspace could not be wiped completely; see the server log");
         }
     }
 

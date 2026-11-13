@@ -110,6 +110,12 @@ class SessionController {
         sessions.get(principal.getName(), id).cancel();
     }
 
+    /** Starts the conversation over and wipes the session's workspace; the session stays open. */
+    @PostMapping("/sessions/{id}/clear")
+    AgentSession.Info clear(@PathVariable String id, Principal principal) {
+        return sessions.clear(principal.getName(), id);
+    }
+
     @PostMapping("/sessions/{id}/mode")
     AgentSession.Info mode(@PathVariable String id, @RequestBody ModeRequest request, Principal principal) {
         if (request.modeId() == null) {

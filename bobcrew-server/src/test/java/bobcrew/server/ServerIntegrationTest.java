@@ -289,6 +289,71 @@ class ServerIntegrationTest {
     }
 
     @Test
+    void clearingStartsOverAndWipesTheWorkspaceButKeepsTheSession() throws Exception {
+        JsonNode session = createSession("clear-a", null);
+        String id = session.get("id").asString();
+        Path workspace = directory.resolve("workspaces/clear-a");
+        Files.writeString(workspace.resolve("notes.txt"), "x");
+        Files.createDirectories(workspace.resolve("sub/dir"));
+        Files.writeString(workspace.resolve("sub/dir/.hidden"), "y");
+        Files.writeString(directory.resolve("workspaces/untouched.txt"), "z");
+
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"first\"}", alice);
+        List<JsonNode> before = events(id, 0, event -> isStatus(event, "IDLE") && event.get("seq").asLong() > 1);
+
+        HttpResponse<String> cleared = send("POST", "/sessions/" + id + "/clear", null, token("carol"));
+        assertThat(cleared.statusCode()).as(cleared.body()).isEqualTo(200);
+        JsonNode info = JSON.readTree(cleared.body());
+        assertThat(info.get("id").asString()).isEqualTo(id);
+        assertThat(info.get("status").asString()).isEqualTo("IDLE");
+        assertThat(info.get("owner").asString()).isEqualTo("alice");
+
+        assertThat(workspace).isDirectory();
+        try (var children = Files.list(workspace)) {
+            assertThat(children).isEmpty();
+        }
+        assertThat(directory.resolve("workspaces/untouched.txt")).exists();
+
+        // a client that connects now sees the start of the new conversation, not the old one
+        List<JsonNode> after = events(id, 0, event -> isStatus(event, "IDLE"));
+        assertThat(types(after)).containsExactly("cleared", "status");
+        assertThat(after.get(0).get("user").asString()).isEqualTo("carol");
+        assertThat(after.get(0).get("seq").asLong()).isGreaterThan(before.get(before.size() - 1).get("seq").asLong());
+        assertThat(JSON.readTree(send("GET", "/sessions", null, alice).body())).hasSize(1);
+
+        // the session works as before, in a fresh agent session
+        long seen = after.get(after.size() - 1).get("seq").asLong();
+        assertThat(send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"second\"}", alice).statusCode())
+            .isEqualTo(202);
+        List<JsonNode> next = events(id, seen, event -> isStatus(event, "IDLE"));
+        assertThat(agentText(next)).isEqualTo("You said: second ");
+    }
+
+    @Test
+    void clearingIsRefusedWhileBusyOrWhenTheWorkspaceIsSharedOrIsTheRoot() throws Exception {
+        String busy = createSession("clear-busy", null).get("id").asString();
+        Files.writeString(directory.resolve("workspaces/clear-busy/keep.txt"), "x");
+        send("POST", "/sessions/" + busy + "/prompt", "{\"text\":\"be slow\"}", alice);
+        events(busy, 0, event -> "agent_message_chunk".equals(updateKind(event)));
+        assertThat(send("POST", "/sessions/" + busy + "/clear", null, alice).statusCode()).isEqualTo(409);
+        assertThat(directory.resolve("workspaces/clear-busy/keep.txt")).exists();
+        send("POST", "/sessions/" + busy + "/cancel", null, alice);
+        events(busy, 0, event -> "turn_end".equals(event.get("type").asString()));
+
+        // a second open session in the same directory, and one nested inside it
+        createSession("clear-busy/inner", null);
+        assertThat(send("POST", "/sessions/" + busy + "/clear", null, alice).statusCode()).isEqualTo(409);
+        assertThat(directory.resolve("workspaces/clear-busy/keep.txt")).exists();
+
+        String root = createSession(".", null).get("id").asString();
+        assertThat(send("POST", "/sessions/" + root + "/clear", null, alice).statusCode()).isEqualTo(400);
+        assertThat(directory.resolve("workspaces/clear-busy/keep.txt")).exists();
+
+        assertThat(send("POST", "/sessions/no-such-session/clear", null, alice).statusCode()).isEqualTo(404);
+        assertThat(send("POST", "/sessions/" + busy + "/clear", null, null).statusCode()).isEqualTo(401);
+    }
+
+    @Test
     void refusesWorkspacesOutsideTheRoot() throws Exception {
         for (String workspace : List.of("../outside", "/tmp", "a/../../outside", "")) {
             HttpResponse<String> response = send("POST", "/sessions",

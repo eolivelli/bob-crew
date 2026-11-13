@@ -124,6 +124,10 @@ final class AgentSession {
         return status;
     }
 
+    Path workspace() {
+        return workspace;
+    }
+
     Instant updatedAt() {
         return updatedAt;
     }
@@ -184,15 +188,7 @@ final class AgentSession {
             }
             AcpSchema.NewSessionResponse created = newClient
                 .newSession(new AcpSchema.NewSessionRequest(workspace.toString(), List.of()));
-            this.acpSessionId = created.sessionId();
-            if (created.modes() != null) {
-                this.currentMode = created.modes().currentModeId();
-                this.modes = created.modes()
-                    .availableModes()
-                    .stream()
-                    .map(mode -> new Mode(mode.id(), mode.name()))
-                    .toList();
-            }
+            useSession(created);
         } catch (RuntimeException e) {
             log.warn("Session {}: the agent could not be started: {}", id, e.toString());
             setStatus(Status.FAILED);
@@ -204,6 +200,56 @@ final class AgentSession {
             handle.onExit().thenRun(this::onProcessExit);
         }
         setStatus(Status.IDLE);
+    }
+
+    private void useSession(AcpSchema.NewSessionResponse created) {
+        this.acpSessionId = created.sessionId();
+        if (created.modes() != null) {
+            this.currentMode = created.modes().currentModeId();
+            this.modes = created.modes()
+                .availableModes()
+                .stream()
+                .map(mode -> new Mode(mode.id(), mode.name()))
+                .toList();
+        }
+    }
+
+    /**
+     * Starts the conversation over without ending the session: runs {@code wipeWorkspace}, opens a
+     * fresh ACP session in the same agent process, forgets the recorded events and records a
+     * {@link UiEvent#CLEARED} event. The session counts as starting meanwhile, so no prompt gets in.
+     * If it fails, the session is as it was (except for what {@code wipeWorkspace} already removed).
+     * @throws ApiException with 409 if the session is not idle, 502 if the agent refuses a new session
+     */
+    Info clear(String user, Runnable wipeWorkspace) {
+        synchronized (this) {
+            if (status != Status.IDLE) {
+                throw new ApiException(HttpStatus.CONFLICT, "The session is " + status.name().toLowerCase()
+                        + "; it can only be cleared when idle (stop the running turn first)");
+            }
+            setStatus(Status.STARTING);
+        }
+        try {
+            wipeWorkspace.run();
+            AcpSchema.NewSessionResponse created;
+            try {
+                created = client.newSession(new AcpSchema.NewSessionRequest(workspace.toString(), List.of()));
+            } catch (RuntimeException e) {
+                log.warn("Session {}: the agent refused a new session: {}", id, e.toString());
+                throw new ApiException(HttpStatus.BAD_GATEWAY,
+                        "The agent could not start a fresh session: " + rootMessage(e));
+            }
+            useSession(created);
+            events.discard();
+            events.append(UiEvent.CLEARED, user, Map.of());
+        } finally {
+            synchronized (this) {
+                if (status == Status.STARTING) {
+                    setStatus(Status.IDLE);
+                }
+            }
+        }
+        return info();
     }
 
     /**
