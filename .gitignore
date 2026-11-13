@@ -5,6 +5,4 @@ workspaces/
 .idea/
 *.iml
 .vscode/
-clusterinfo.txt
-create-ctool-cluster.sh
-install_bobcrew_utils.sh
+.lab/
