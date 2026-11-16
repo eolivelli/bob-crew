@@ -56,15 +56,22 @@ function linkSegments(text) {
 }
 
 // The nodes for a piece of text, with its https and file links as <a> elements.
-function linkify(text, sessionId) {
+function linkify(text, sessionId, serverName) {
   return linkSegments(text).map((segment) => {
     if (!segment.href) return document.createTextNode(segment.text);
     const anchor = document.createElement('a');
     if (segment.isFile) {
       const filePath = segment.href.replace(/^file:\/\//, '');
       const sId = sessionId || (typeof state !== 'undefined' ? state.current : null);
+      let srv = serverName;
+      if (!srv && typeof currentSession === 'function') {
+        const cur = currentSession();
+        if (cur) srv = cur.server;
+      }
       if (sId) {
-        anchor.href = `/api/sessions/${encodeURIComponent(sId)}/file?path=${encodeURIComponent(filePath)}`;
+        const base = srv ? `/api/servers/${encodeURIComponent(srv)}/sessions/${encodeURIComponent(sId)}`
+                         : `/api/sessions/${encodeURIComponent(sId)}`;
+        anchor.href = `${base}/file?path=${encodeURIComponent(filePath)}`;
       } else {
         anchor.href = segment.href;
       }

@@ -73,6 +73,18 @@ bobcrew.ui.token=<the token>
 bobcrew.ui.ca-file=/path/to/ca.crt
 ```
 
+Multiple servers can also be configured:
+
+```
+bobcrew.ui.servers.prod.url=https://prod.example.com:8443
+bobcrew.ui.servers.prod.token=<token>
+bobcrew.ui.servers.prod.ca-file=/path/to/prod-ca.crt
+
+bobcrew.ui.servers.dev.url=https://dev.example.com:8443
+bobcrew.ui.servers.dev.token-file=/path/to/dev.token
+bobcrew.ui.servers.dev.ca-file=/path/to/dev-ca.crt
+```
+
 then start the UI and open <http://127.0.0.1:8642>:
 
 ```

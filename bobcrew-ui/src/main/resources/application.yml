@@ -14,10 +14,8 @@ spring:
 
 bobcrew:
   ui:
-    # Base URL of the bob-crew server, for example https://bob.example.com:8443
+    # Single server configuration (or use bobcrew.ui.servers.<name>.* in ~/.bobcrew/ui.properties)
     server-url: ${BOBCREW_SERVER_URL:}
-    # The API token, or a file that contains it
     token: ${BOBCREW_TOKEN:}
     token-file: ${BOBCREW_TOKEN_FILE:}
-    # PEM file with the CA (or the certificate itself) to trust for the server, when it is not publicly trusted
     ca-file: ${BOBCREW_CA_FILE:}

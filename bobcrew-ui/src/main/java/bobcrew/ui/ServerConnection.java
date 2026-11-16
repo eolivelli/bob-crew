@@ -17,16 +17,16 @@ import javax.net.ssl.TrustManagerFactory;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
 
 /**
- * Where the bob-crew server is and how to reach it: its base URL, the token to present, and an
+ * Where one bob-crew server is and how to reach it: its name, base URL, the token to present, and an
  * HTTP client that trusts the configured CA. Certificate and host name checks are always on.
  */
-@Component
 class ServerConnection {
 
     private static final Logger log = LoggerFactory.getLogger(ServerConnection.class);
+
+    private final String name;
 
     private final URI baseUri;
 
@@ -35,26 +35,33 @@ class ServerConnection {
     private final HttpClient client;
 
     ServerConnection(UiProperties properties) {
-        String url = properties.serverUrl();
+        this(null, properties.serverUrl(), properties.token(), properties.tokenFile(), properties.caFile());
+    }
+
+    ServerConnection(String name, String url, String token, String tokenFile, String caFile) {
         if (url == null || url.isBlank()) {
-            throw new IllegalStateException("bobcrew.ui.server-url is not set (BOBCREW_SERVER_URL, or "
-                    + "~/.bobcrew/ui.properties)");
+            throw new IllegalStateException("Server URL is not set for " + (name != null ? name : "server"));
         }
         URI uri = URI.create(url.strip().replaceAll("/+$", ""));
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) {
-            throw new IllegalStateException("bobcrew.ui.server-url must be an https URL, but is " + url);
+            throw new IllegalStateException("Server URL must be an https URL, but is " + url);
         }
         this.baseUri = uri;
-        this.token = readToken(properties);
+        this.name = name != null && !name.isBlank() ? name.strip() : uri.getHost();
+        this.token = readToken(token, tokenFile, this.name);
         HttpClient.Builder builder = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(10))
             .followRedirects(HttpClient.Redirect.NEVER);
-        if (properties.caFile() != null && !properties.caFile().isBlank()) {
-            builder.sslContext(trusting(Path.of(properties.caFile())));
+        if (caFile != null && !caFile.isBlank()) {
+            builder.sslContext(trusting(Path.of(caFile)));
         }
         this.client = builder.build();
-        log.info("Forwarding API calls to {}", baseUri);
+        log.info("Registered server '{}' at {}", this.name, baseUri);
+    }
+
+    String name() {
+        return name;
     }
 
     URI baseUri() {
@@ -69,23 +76,20 @@ class ServerConnection {
         return client;
     }
 
-    private static String readToken(UiProperties properties) {
-        String token = properties.token();
-        if ((token == null || token.isBlank()) && properties.tokenFile() != null
-                && !properties.tokenFile().isBlank()) {
+    private static String readToken(String token, String tokenFile, String serverName) {
+        if ((token == null || token.isBlank()) && tokenFile != null && !tokenFile.isBlank()) {
             try {
-                token = Files.readString(Path.of(properties.tokenFile()));
+                token = Files.readString(Path.of(tokenFile));
             } catch (IOException e) {
-                throw new IllegalStateException("Cannot read the token file " + properties.tokenFile() + ": " + e, e);
+                throw new IllegalStateException("Cannot read the token file " + tokenFile + " for server " + serverName + ": " + e, e);
             }
         }
         if (token == null || token.isBlank()) {
-            throw new IllegalStateException("No API token: set bobcrew.ui.token or bobcrew.ui.token-file "
-                    + "(BOBCREW_TOKEN, BOBCREW_TOKEN_FILE, or ~/.bobcrew/ui.properties)");
+            throw new IllegalStateException("No API token for server " + serverName + ": set token or token-file");
         }
         token = token.strip();
         if (token.chars().anyMatch(c -> c <= ' ' || c > '~')) {
-            throw new IllegalStateException("The API token contains characters that cannot be sent in a header");
+            throw new IllegalStateException("The API token for server " + serverName + " contains characters that cannot be sent in a header");
         }
         return token;
     }

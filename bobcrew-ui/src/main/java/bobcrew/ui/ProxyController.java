@@ -14,13 +14,17 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
- * Forwards {@code /api/**} to the bob-crew server, adding the token. The browser never sees the
- * token, and the server needs no CORS. Responses are streamed through as they arrive, which is
- * what keeps the Server-Sent Events of a session flowing.
+ * Forwards {@code /api/**} to the appropriate bob-crew server, adding that server's token. The browser
+ * never sees the token, and the server needs no CORS. Responses are streamed through as they arrive,
+ * which is what keeps the Server-Sent Events of a session flowing.
  */
 @RestController
 class ProxyController {
@@ -32,10 +36,24 @@ class ProxyController {
 
     private static final List<String> FORWARDED_REQUEST_HEADERS = List.of("Content-Type", "Accept", "Last-Event-ID");
 
-    private final ServerConnection server;
+    private final ServerRegistry registry;
 
-    ProxyController(ServerConnection server) {
-        this.server = server;
+    private final JsonMapper json = JsonMapper.builder().build();
+
+    ProxyController(ServerRegistry registry) {
+        this.registry = registry;
+    }
+
+    @GetMapping("/api/servers")
+    void listServers(HttpServletResponse response) throws IOException {
+        response.setContentType("application/json");
+        ArrayNode array = json.createArrayNode();
+        for (ServerConnection server : registry.all()) {
+            ObjectNode node = array.addObject();
+            node.put("name", server.name());
+            node.put("url", server.baseUri().toString());
+        }
+        response.getOutputStream().write(json.writeValueAsBytes(array));
     }
 
     @RequestMapping("/api/**")
@@ -48,8 +66,33 @@ class ProxyController {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid path");
             return;
         }
+
+        ServerConnection server;
+        String forwardedPath;
+
+        if (path.startsWith("/api/servers/")) {
+            String after = path.substring("/api/servers/".length());
+            int slash = after.indexOf('/');
+            String serverName;
+            if (slash < 0) {
+                serverName = after;
+                forwardedPath = "/api";
+            } else {
+                serverName = after.substring(0, slash);
+                forwardedPath = "/api" + after.substring(slash);
+            }
+            server = registry.get(serverName);
+            if (server == null) {
+                sendError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown server: " + serverName);
+                return;
+            }
+        } else {
+            server = registry.defaultServer();
+            forwardedPath = path;
+        }
+
         String query = request.getQueryString();
-        URI target = URI.create(server.baseUri() + path + (query == null ? "" : "?" + query));
+        URI target = URI.create(server.baseUri() + forwardedPath + (query == null ? "" : "?" + query));
 
         byte[] body = request.getInputStream().readNBytes(MAX_BODY + 1);
         if (body.length > MAX_BODY) {

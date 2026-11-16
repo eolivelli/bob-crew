@@ -187,6 +187,22 @@ class UiProxyTest {
     }
 
     @Test
+    void listsConfiguredServersAndRoutesByServerName() throws Exception {
+        HttpResponse<String> servers = get("/api/servers");
+        assertThat(servers.statusCode()).isEqualTo(200);
+        assertThat(servers.body()).contains("\"name\":\"localhost\"")
+            .contains("https://localhost:" + upstream.getAddress().getPort());
+
+        HttpResponse<String> serverRouted = get("/api/servers/localhost/sessions");
+        assertThat(serverRouted.statusCode()).isEqualTo(200);
+        assertThat(serverRouted.body()).contains("\"method\":\"GET\"").contains("\"uri\":\"/api/sessions\"");
+
+        HttpResponse<String> unknownServer = get("/api/servers/nonexistent/sessions");
+        assertThat(unknownServer.statusCode()).isEqualTo(404);
+        assertThat(unknownServer.body()).contains("Unknown server: nonexistent");
+    }
+
+    @Test
     void passesOnErrorsAndExplainsARejectedToken() throws Exception {
         HttpResponse<String> missing = get("/api/missing");
         assertThat(missing.statusCode()).isEqualTo(404);

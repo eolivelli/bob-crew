@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   user: '',             // who this UI is signed in as
+  servers: [],          // list of configured servers [{name, url}]
   sessions: [],
   current: null,        // id of the selected session
   source: null,         // its EventSource
@@ -16,6 +17,19 @@ const state = {
   streaming: null,      // {kind, body}: the message that chunks are appended to
   plan: null,           // the plan card of the current turn
 };
+
+function currentSession() {
+  if (!state.current) return null;
+  return state.sessions.find((s) => s.id === state.current || (s.server && `${s.server}:${s.id}` === state.current)) || null;
+}
+
+function sessionApi(subPath) {
+  const session = currentSession();
+  if (session && session.server) {
+    return `/servers/${encodeURIComponent(session.server)}/sessions/${encodeURIComponent(session.id)}${subPath || ''}`;
+  }
+  return `/sessions/${encodeURIComponent(state.current)}${subPath || ''}`;
+}
 
 async function api(method, path, body) {
   const response = await fetch('/api' + path, {
@@ -49,29 +63,77 @@ function el(tag, className, text) {
 
 // ---- session list -------------------------------------------------------
 
+async function refreshServers() {
+  try {
+    state.servers = await api('GET', '/servers');
+  } catch (e) {
+    state.servers = [];
+  }
+  const select = $('new-server');
+  const prev = select.value;
+  select.replaceChildren(...state.servers.map((s) => {
+    const option = el('option', '', s.name);
+    option.value = s.name;
+    return option;
+  }));
+  if (prev && state.servers.some((s) => s.name === prev)) {
+    select.value = prev;
+  } else if (state.servers.length) {
+    select.value = state.servers[0].name;
+  }
+  select.hidden = state.servers.length <= 1;
+}
+
 async function refreshSessions() {
   try {
-    state.sessions = await api('GET', '/sessions');
+    if (state.servers.length > 1) {
+      const lists = await Promise.all(state.servers.map(async (srv) => {
+        try {
+          const res = await api('GET', `/servers/${encodeURIComponent(srv.name)}/sessions`);
+          return (res || []).map((s) => ({ ...s, server: srv.name }));
+        } catch (e) {
+          return [];
+        }
+      }));
+      state.sessions = lists.flat();
+    } else {
+      const single = await api('GET', '/sessions');
+      const defaultName = state.servers.length === 1 ? state.servers[0].name : '';
+      state.sessions = (single || []).map((s) => ({ ...s, server: s.server || defaultName }));
+    }
   } catch (e) {
     notify(e.message);
     return;
   }
   const list = $('sessions');
   list.replaceChildren();
-  for (const session of state.sessions) {
-    const item = el('li', session.id === state.current ? 'selected' : '');
-    item.append(el('span', 'name', session.title),
-      el('span', 'sub', `${session.status.toLowerCase()} · ${session.owner} · ${session.workspace}`));
-    item.addEventListener('click', () => select(session.id));
-    list.append(item);
+
+  const serverNames = [...new Set(state.sessions.map((s) => s.server || 'default'))];
+  const hasMultiple = state.servers.length > 1 || serverNames.length > 1;
+
+  for (const sName of serverNames) {
+    if (hasMultiple) {
+      list.append(el('li', 'server-group-header', sName));
+    }
+    const serverSessions = state.sessions.filter((s) => (s.server || 'default') === sName);
+    for (const session of serverSessions) {
+      const isSelected = session.id === state.current || (session.server && `${session.server}:${session.id}` === state.current);
+      const item = el('li', isSelected ? 'selected' : '');
+      item.append(el('span', 'name', session.title),
+        el('span', 'sub', `${session.status.toLowerCase()} · ${session.owner} · ${session.workspace}`));
+      item.addEventListener('click', () => select(session.id, session.server));
+      list.append(item);
+    }
   }
-  const current = state.sessions.find((s) => s.id === state.current);
+  const current = currentSession();
   if (current) showHeader(current);
 }
 
 async function refreshWorkspaces() {
+  const server = $('new-server').value;
   try {
-    const names = await api('GET', '/workspaces');
+    const path = server ? `/servers/${encodeURIComponent(server)}/workspaces` : '/workspaces';
+    const names = await api('GET', path);
     $('workspaces').replaceChildren(...names.map((name) => {
       const option = el('option');
       option.value = name;
@@ -83,8 +145,9 @@ async function refreshWorkspaces() {
 function showHeader(session) {
   $('session-header').hidden = false;
   $('session-title').textContent = session.title;
+  const serverInfo = session.server ? ` · server ${session.server}` : '';
   $('session-meta').textContent =
-    `${session.agent || 'agent'} · workspace ${session.workspace} · owner ${session.owner}`;
+    `${session.agent || 'agent'}${serverInfo} · workspace ${session.workspace} · owner ${session.owner}`;
   setStatus(session.status);
   const select = $('session-mode');
   select.replaceChildren(...(session.modes || []).map((mode) => {
@@ -110,23 +173,27 @@ function setStatus(status) {
 
 // ---- one session --------------------------------------------------------
 
-function select(id) {
+function select(id, serverName) {
   if (state.source) state.source.close();
   state.current = id;
-  // keeps the selection across a reload, and makes the session linkable
-  history.replaceState(null, '', '#' + id);
+  const session = state.sessions.find((s) => s.id === id && (!serverName || s.server === serverName))
+      || state.sessions.find((s) => s.id === id);
+  const server = serverName || (session ? session.server : null);
+  const hashKey = server ? `${server}:${id}` : id;
+  history.replaceState(null, '', '#' + hashKey);
   state.events = [];
   state.toolCalls.clear();
   state.permissions.clear();
   state.streaming = null;
   state.plan = null;
   $('transcript').replaceChildren();
-  const session = state.sessions.find((s) => s.id === id);
   if (session) showHeader(session);
   refreshSessions();
 
   // On a reconnect the browser sends Last-Event-ID, so the server resumes where we were.
-  const source = new EventSource(`/api/sessions/${encodeURIComponent(id)}/events?after=0`);
+  const eventPath = server ? `/api/servers/${encodeURIComponent(server)}/sessions/${encodeURIComponent(id)}/events?after=0`
+      : `/api/sessions/${encodeURIComponent(id)}/events?after=0`;
+  const source = new EventSource(eventPath);
   state.source = source;
   source.onmessage = (message) => {
     if (state.source !== source) return;
@@ -141,142 +208,28 @@ function select(id) {
 }
 
 function add(node) {
-  const transcript = $('transcript');
-  const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
-  transcript.append(node);
-  if (atBottom) transcript.scrollTop = transcript.scrollHeight;
-  return node;
+  $('transcript').append(node);
+  node.scrollIntoView({ block: 'end' });
 }
 
-// An element whose text has its https links made clickable.
 function linked(tag, className, text) {
   const node = el(tag, className);
   node.append(...linkify(text));
   return node;
 }
 
-// A link can arrive split across chunks, so the message is rebuilt from its whole text; doing it
-// at most every 30 ms keeps a long reply, or a replay of many chunks, cheap.
-function appendChunk(kind, text) {
-  if (!state.streaming || state.streaming.kind !== kind || !state.streaming.body.isConnected) {
-    const message = add(el('div', 'msg ' + kind));
-    state.streaming = { kind, body: message, text: '', queued: false };
-  }
-  const streaming = state.streaming;
-  streaming.text += text;
-  if (streaming.queued) return;
-  streaming.queued = true;
-  setTimeout(() => {
-    streaming.queued = false;
-    const transcript = $('transcript');
-    const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
-    streaming.body.replaceChildren(...linkify(streaming.text));
-    if (atBottom) transcript.scrollTop = transcript.scrollHeight;
-  }, 30);
-}
-
-function toolCard(id) {
-  let card = state.toolCalls.get(id);
-  if (!card) {
-    const root = add(el('div', 'card tool'));
-    const head = el('div', 'head');
-    const status = el('span', 'status');
-    const title = el('span', 'title');
-    head.append(status, title);
-    const output = el('pre');
-    output.hidden = true;
-    root.append(head, output);
-    card = { root, status, title, output };
-    state.toolCalls.set(id, card);
-    state.streaming = null;
-  }
-  return card;
-}
-
-function updateTool(update) {
-  const card = toolCard(update.toolCallId);
-  if (update.title) card.title.textContent = update.title;
-  if (update.status) {
-    card.status.textContent = update.status.replace('_', ' ');
-    card.status.className = 'status status-' + update.status;
-  }
-  const output = toolOutput(update);
-  if (output !== null) {
-    card.output.replaceChildren(...linkify(output));
-    card.output.hidden = false;
-  }
-}
-
-function renderPlan(update) {
-  if (!state.plan || !state.plan.isConnected) {
-    state.plan = add(el('div', 'card plan'));
-    state.streaming = null;
-  }
-  const list = el('ol');
-  for (const entry of update.entries || []) {
-    list.append(linked('li', entry.status || '', entry.content));
-  }
-  state.plan.replaceChildren(el('div', 'title', 'Plan'), list);
-}
-
-function renderPermission(data) {
-  state.streaming = null;
-  const root = add(el('div', 'card permission'));
-  root.append(el('div', 'title', 'Permission needed: ' + ((data.toolCall && data.toolCall.title) || data.toolCallId)));
-  const options = el('div', 'options');
-  for (const option of data.options || []) {
-    const button = el('button', '', option.name);
-    button.type = 'button';
-    button.addEventListener('click', async () => {
-      try {
-        await api('POST', `/sessions/${state.current}/permissions/${encodeURIComponent(data.toolCallId)}`,
-          { optionId: option.optionId });
-      } catch (e) {
-        notify(e.message);
-      }
-    });
-    options.append(button);
-  }
-  const result = el('div', 'result');
-  root.append(options, result);
-  state.permissions.set(data.toolCallId, { options, result, names: data.options || [] });
-}
-
-function resolvePermission(event) {
-  const card = state.permissions.get(event.data.toolCallId);
-  if (!card) return;
-  for (const button of card.options.querySelectorAll('button')) button.disabled = true;
-  const chosen = card.names.find((option) => option.optionId === event.data.optionId);
-  if (event.data.timedOut) {
-    card.result.textContent = 'Nobody answered in time: ' + (chosen ? chosen.name : 'cancelled');
-  } else if (event.data.outcome === 'selected') {
-    card.result.textContent = `${event.user || 'someone'} chose: ${chosen ? chosen.name : event.data.optionId}`;
-  } else {
-    card.result.textContent = 'Cancelled';
-  }
-  state.permissions.delete(event.data.toolCallId);
-}
+// ---- rendering events into the transcript ------------------------------
 
 function render(event) {
   const data = event.data || {};
   switch (event.type) {
-    case 'user_prompt': {
+    case 'user_prompt':
       state.streaming = null;
       state.plan = null;
-      const message = add(el('div', 'msg user'));
-      message.append(el('span', 'who', event.user || ''), ...linkify(data.text || ''));
+      add(linked('div', 'msg user', data.text || ''));
       break;
-    }
     case 'update':
-      switch (data.sessionUpdate) {
-        case 'agent_message_chunk': appendChunk('agent', textOf(data.content)); break;
-        case 'agent_thought_chunk': appendChunk('thought', textOf(data.content)); break;
-        case 'tool_call':
-        case 'tool_call_update': updateTool(data); break;
-        case 'plan': renderPlan(data); break;
-        case 'current_mode_update': $('session-mode').value = data.currentModeId; break;
-        default: break; // updates this UI does not show
-      }
+      renderUpdate(data);
       break;
     case 'cleared':
       // everything before it is gone from the server's log too
@@ -305,6 +258,136 @@ function render(event) {
   }
 }
 
+function renderUpdate(data) {
+  switch (data.sessionUpdate) {
+    case 'agent_thought_chunk':
+      renderChunk('thought', (data.content && data.content.text) || '');
+      break;
+    case 'agent_message_chunk':
+      renderChunk('agent', (data.content && data.content.text) || '');
+      break;
+    case 'tool_call':
+      renderToolCall(data);
+      break;
+    case 'tool_call_update':
+      updateToolCall(data);
+      break;
+    case 'plan':
+      renderPlan(data.entries || []);
+      break;
+    case 'current_mode_update':
+      if (data.currentModeId) $('session-mode').value = data.currentModeId;
+      break;
+    default:
+      // unknown kinds: pass through visibly rather than dropping them
+      add(el('pre', 'card unknown', JSON.stringify(data, null, 2)));
+      break;
+  }
+}
+
+function renderChunk(kind, text) {
+  let streaming = state.streaming;
+  if (!streaming || streaming.kind !== kind) {
+    const message = el('div', 'msg ' + kind);
+    add(message);
+    streaming = { kind, body: message, text: '' };
+    state.streaming = streaming;
+  }
+  streaming.text += text;
+  streaming.body.replaceChildren(...linkify(streaming.text));
+  streaming.body.scrollIntoView({ block: 'end' });
+}
+
+function renderToolCall(call) {
+  state.streaming = null;
+  const card = el('div', 'card tool');
+  const head = el('div', 'head');
+  head.append(el('span', 'title', call.title || call.kind || 'Tool call'));
+  if (call.status) head.append(el('span', 'status status-' + call.status, call.status));
+  card.append(head);
+  if (call.locations && call.locations.length) {
+    card.append(el('pre', 'locations', call.locations.map((l) => l.path || JSON.stringify(l)).join('\n')));
+  }
+  if (call.rawInput) {
+    card.append(el('pre', 'input', typeof call.rawInput === 'string' ? call.rawInput : JSON.stringify(call.rawInput, null, 2)));
+  }
+  const output = el('pre', 'output');
+  output.hidden = true;
+  card.append(output);
+  add(card);
+  state.toolCalls.set(call.toolCallId, { card, head, output });
+}
+
+function updateToolCall(call) {
+  const card = state.toolCalls.get(call.toolCallId);
+  if (!card) return;
+  if (call.status) {
+    const existing = card.head.querySelector('.status');
+    if (existing) existing.remove();
+    card.head.append(el('span', 'status status-' + call.status, call.status));
+  }
+  if (call.output !== undefined && call.output !== null) {
+    const output = typeof call.output === 'string' ? call.output : JSON.stringify(call.output, null, 2);
+    card.output.replaceChildren(...linkify(output));
+    card.output.hidden = false;
+  }
+}
+
+function renderPlan(entries) {
+  state.streaming = null;
+  let card = state.plan;
+  if (!card) {
+    card = el('div', 'card plan');
+    card.append(el('div', 'title', 'Plan'), el('ol'));
+    add(card);
+    state.plan = card;
+  }
+  const list = card.querySelector('ol');
+  list.replaceChildren();
+  for (const entry of entries) {
+    const item = el('li', entry.status || '', entry.content || '');
+    list.append(item);
+  }
+}
+
+function renderPermission(request) {
+  state.streaming = null;
+  const card = el('div', 'card permission');
+  card.append(el('div', 'title', request.title || 'Permission request'));
+  if (request.locations && request.locations.length) {
+    card.append(el('pre', 'locations', request.locations.map((l) => l.path || JSON.stringify(l)).join('\n')));
+  }
+  if (request.rawInput) {
+    card.append(el('pre', 'input', typeof request.rawInput === 'string' ? request.rawInput : JSON.stringify(request.rawInput, null, 2)));
+  }
+  const options = el('div', 'options');
+  for (const opt of request.options || []) {
+    const option = el('button', opt.kind === 'reject' ? 'danger' : '', opt.name);
+    option.type = 'button';
+    option.addEventListener('click', async () => {
+      try {
+        await api('POST', sessionApi(`/permissions/${encodeURIComponent(request.toolCallId)}`), { optionId: opt.optionId });
+      } catch (e) {
+        notify(e.message);
+      }
+    });
+    options.append(option);
+  }
+  card.append(options);
+  add(card);
+  state.permissions.set(request.toolCallId, card);
+}
+
+function resolvePermission(event) {
+  const data = event.data || {};
+  const card = state.permissions.get(data.toolCallId);
+  if (!card) return;
+  const options = card.querySelector('.options');
+  if (options) options.remove();
+  const who = event.user ? ' by ' + event.user : '';
+  card.append(el('div', 'result', data.optionId ? `Answered (${data.optionId})${who}` : `Cancelled${who}`));
+}
+
 // ---- actions ------------------------------------------------------------
 
 $('notice').addEventListener('click', () => { $('notice').hidden = true; });
@@ -313,12 +396,15 @@ $('new-session').addEventListener('submit', async (submit) => {
   submit.preventDefault();
   const button = submit.target.querySelector('button');
   button.disabled = true;
+  const server = $('new-server').value;
   try {
-    const session = await api('POST', '/sessions',
+    const createPath = server ? `/servers/${encodeURIComponent(server)}/sessions` : '/sessions';
+    const session = await api('POST', createPath,
       { workspace: $('new-workspace').value.trim(), title: $('new-title').value.trim() });
+    if (server) session.server = server;
     $('new-title').value = '';
     state.sessions.unshift(session);
-    select(session.id);
+    select(session.id, server);
     refreshWorkspaces();
   } catch (e) {
     notify(e.message);
@@ -331,7 +417,7 @@ async function sendPrompt() {
   const text = $('prompt').value;
   if (!text.trim() || !state.current) return;
   try {
-    await api('POST', `/sessions/${state.current}/prompt`, { text });
+    await api('POST', sessionApi('/prompt'), { text });
     $('prompt').value = '';
   } catch (e) {
     notify(e.message);
@@ -348,12 +434,12 @@ $('prompt').addEventListener('keydown', (key) => {
 });
 
 $('cancel').addEventListener('click', async () => {
-  try { await api('POST', `/sessions/${state.current}/cancel`); } catch (e) { notify(e.message); }
+  try { await api('POST', sessionApi('/cancel')); } catch (e) { notify(e.message); }
 });
 
 $('session-mode').addEventListener('change', async (change) => {
   try {
-    await api('POST', `/sessions/${state.current}/mode`, { modeId: change.target.value });
+    await api('POST', sessionApi('/mode'), { modeId: change.target.value });
   } catch (e) {
     notify(e.message);
     refreshSessions();
@@ -361,7 +447,7 @@ $('session-mode').addEventListener('change', async (change) => {
 });
 
 $('export').addEventListener('click', async () => {
-  const session = state.sessions.find((s) => s.id === state.current);
+  const session = currentSession();
   if (!session) return;
   if (!state.events.length) {
     notify('Nothing to export yet.');
@@ -375,12 +461,12 @@ $('export').addEventListener('click', async () => {
 });
 
 $('clear').addEventListener('click', async () => {
-  const session = state.sessions.find((s) => s.id === state.current);
+  const session = currentSession();
   if (!session) return;
   if (!window.confirm(`Clear this session? Everything in the workspace "${session.workspace}" will be deleted `
       + 'and the conversation will start over. This cannot be undone. The session stays open.')) return;
   try {
-    await api('POST', `/sessions/${state.current}/clear`);
+    await api('POST', sessionApi('/clear'));
     refreshSessions(); // the agent's modes start over
   } catch (e) {
     notify(e.message);
@@ -390,7 +476,7 @@ $('clear').addEventListener('click', async () => {
 $('close').addEventListener('click', async () => {
   if (!state.current || !window.confirm('Close this session and stop its agent?')) return;
   try {
-    await api('DELETE', `/sessions/${state.current}`);
+    await api('DELETE', sessionApi());
     if (state.source) state.source.close();
     state.current = null;
     history.replaceState(null, '', '#');
@@ -403,7 +489,10 @@ $('close').addEventListener('click', async () => {
   }
 });
 
+$('new-server').addEventListener('change', () => refreshWorkspaces());
+
 (async function start() {
+  await refreshServers();
   try {
     const me = await api('GET', '/me');
     state.user = me.user;
@@ -414,6 +503,11 @@ $('close').addEventListener('click', async () => {
   refreshWorkspaces();
   await refreshSessions();
   const linked = location.hash.slice(1);
-  if (linked && state.sessions.some((session) => session.id === linked)) select(linked);
+  if (linked) {
+    const [sServer, sId] = linked.includes(':') ? linked.split(':', 2) : [null, linked];
+    const match = state.sessions.find((s) => s.id === (sId || linked) && (!sServer || s.server === sServer))
+        || state.sessions.find((s) => s.id === linked);
+    if (match) select(match.id, match.server);
+  }
   setInterval(refreshSessions, 5000);
 })();
