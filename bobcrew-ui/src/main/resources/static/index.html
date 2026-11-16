@@ -34,6 +34,7 @@
     <div class="controls">
       <span id="session-status" class="badge"></span>
       <select id="session-mode" title="Mode"></select>
+      <button id="upload" type="button" title="Put files from this computer into the session's workspace (or drop them on the conversation)">Upload files</button>
       <button id="metrics-toggle" type="button" title="CPU, memory and I/O of the session's container">Metrics</button>
       <button id="export" type="button" title="Download the whole session as a gzipped HTML file">Export transcript</button>
       <button id="cancel" type="button">Stop</button>
@@ -57,6 +58,17 @@
         <button value="keep" type="submit">Clear conversation, keep files</button>
         <button value="wipe" class="danger" type="submit">Clear and delete workspace files</button>
         <button value="cancel" type="submit" class="plain">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="upload-dialog">
+    <form method="dialog">
+      <p>Upload files into the session's workspace, <code>/opt/workspace</code>. A file of the same name is replaced.</p>
+      <label>Files <input id="upload-files" type="file" multiple required></label>
+      <label>Folder <input id="upload-folder" placeholder="in the workspace, e.g. docs (empty: the workspace itself)" maxlength="1000" autocomplete="off"></label>
+      <div class="dialog-buttons">
+        <button value="upload" type="submit">Upload</button>
+        <button value="cancel" type="submit" class="plain" formnovalidate>Cancel</button>
       </div>
     </form>
   </dialog>

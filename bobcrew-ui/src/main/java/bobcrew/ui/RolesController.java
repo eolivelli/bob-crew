@@ -16,7 +16,8 @@ import org.springframework.web.bind.annotation.RestController;
 class RolesController {
 
     /** A role in the list: no prompt, so the list stays small. */
-    record Summary(String id, String name, String description, String image, List<String> env) {
+    record Summary(String id, String name, String description, String image, List<String> env, String repository,
+            String branch) {
     }
 
     private final RoleRegistry roles;
@@ -27,7 +28,8 @@ class RolesController {
 
     @GetMapping("/api/roles")
     List<Summary> list() {
-        return roles.list().stream().map(r -> new Summary(r.id(), r.name(), r.description(), r.image(), r.env())).toList();
+        return roles.list().stream().map(r -> new Summary(r.id(), r.name(), r.description(), r.image(), r.env(),
+                r.repository(), r.branch())).toList();
     }
 
     @GetMapping("/api/roles/{id}")

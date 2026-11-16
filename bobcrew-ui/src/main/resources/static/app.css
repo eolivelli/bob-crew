@@ -186,15 +186,20 @@ main.showing-roles > :not(#roles-view):not(#notice) { display: none; }
 #metrics-list dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
 button.active { border-color: var(--accent); color: var(--accent); }
 
-/* the Clear dialog */
-#clear-dialog {
+/* the Clear and Upload dialogs */
+#upload-dialog, #clear-dialog {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
   max-width: 480px;
 }
-#clear-dialog::backdrop { background: rgb(0 0 0 / 40%); }
+#clear-dialog::backdrop, #upload-dialog::backdrop { background: rgb(0 0 0 / 40%); }
+#upload-dialog label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
+#upload-dialog input { font: inherit; color: var(--text); }
+#upload-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
+#upload-dialog button[value=upload] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+#transcript.dropping { outline: 2px dashed var(--accent); outline-offset: -6px; }
 #clear-dialog .hint { color: var(--muted); font-size: 13px; }
 #clear-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
 #clear-dialog button[value=keep] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }

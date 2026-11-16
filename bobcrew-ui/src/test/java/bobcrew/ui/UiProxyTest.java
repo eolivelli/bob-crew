@@ -59,6 +59,8 @@ class UiProxyTest {
                     "---\nname: QA Tester\ndescription: Finds defects\n---\nTest the app.\n");
             Files.writeString(rolesDir.resolve("builder.md"),
                     "---\nname: Builder\nimage: bobcrew/bob-java:latest\nenv: GH_TOKEN, NOT_SET_HERE\n---\nBuild it.\n");
+            Files.writeString(rolesDir.resolve("cloner.md"),
+                    "---\nname: Cloner\nrepository: https://github.com/datastax/cassandra\nbranch: main\n---\nFix it.\n");
             Path keyStoreFile = directory.resolve("upstream.p12");
             Process keytool = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "keytool").toString(),
                     "-genkeypair", "-alias", "server", "-keyalg", "RSA", "-keysize", "2048", "-validity", "2",
@@ -113,6 +115,10 @@ class UiProxyTest {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        } else if (path.endsWith("/files")) {
+            respond(exchange, 201, "application/json", "{\"method\":\"" + exchange.getRequestMethod()
+                    + "\",\"uri\":\"" + exchange.getRequestURI() + "\",\"received\":" + body.length
+                    + ",\"sum\":" + java.util.Arrays.hashCode(body) + "}");
         } else if (path.equals("/api/missing")) {
             respond(exchange, 404, "application/json", "{\"error\":\"No such session\"}");
         } else {
@@ -260,6 +266,10 @@ class UiProxyTest {
         HttpResponse<String> routed = post("/api/servers/localhost/sessions", "{\"role\":\"builder\"}");
         assertThat(routed.body()).contains("\"uri\":\"/api/sessions\"").contains("secret-gh-token");
 
+        // a role with a repository to clone
+        assertThat(post("/api/sessions", "{\"role\":\"cloner\"}").body()).contains("\"body\":{\"repository\":"
+                + "{\"url\":\"https://github.com/datastax/cassandra\",\"branch\":\"main\"}}");
+
         // a role without image or env, and no role at all
         assertThat(post("/api/sessions", "{\"role\":\"qa-tester\"}").body()).contains("\"body\":{}");
         assertThat(post("/api/sessions", "{\"title\":\"plain\"}").body()).contains("\"body\":{\"title\":\"plain\"}");
@@ -269,7 +279,8 @@ class UiProxyTest {
     @Test
     void thePageCannotChooseTheImageOrEnvironmentItself() throws Exception {
         for (String body : new String[] {"{\"image\":\"evil/image\"}", "{\"env\":{\"X\":\"1\"}}",
-                "{\"role\":\"builder\",\"env\":{}}"}) {
+                "{\"role\":\"builder\",\"env\":{}}", "{\"repository\":{\"url\":\"https://evil.example/x\"}}",
+                "{\"role\":\"cloner\",\"repository\":null}"}) {
             HttpResponse<String> refused = post("/api/sessions", body);
             assertThat(refused.statusCode()).as(body).isEqualTo(400);
             assertThat(refused.body()).as(body).doesNotContain("\"method\"").doesNotContain("secret-gh-token");
@@ -282,6 +293,33 @@ class UiProxyTest {
         // the role list shows names, never values
         assertThat(get("/api/roles").body()).contains("\"env\":[\"GH_TOKEN\",\"NOT_SET_HERE\"]")
             .contains("\"image\":\"bobcrew/bob-java:latest\"").doesNotContain("secret-gh-token");
+    }
+
+    @Test
+    void streamsUploadsLargerThanOtherRequestsMayBe() throws Exception {
+        byte[] content = new byte[3 * 1024 * 1024];
+        new java.util.Random(7).nextBytes(content);
+        HttpResponse<String> uploaded = browser.send(HttpRequest.newBuilder(uri("/api/sessions/abc/files?path=a%20b.bin"))
+            .header("X-BobCrew", "1")
+            .header("Content-Type", "application/octet-stream")
+            .PUT(HttpRequest.BodyPublishers.ofByteArray(content))
+            .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(uploaded.statusCode()).isEqualTo(201);
+        assertThat(uploaded.body()).contains("\"method\":\"PUT\"", "\"uri\":\"/api/sessions/abc/files?path=a%20b.bin\"",
+                "\"received\":" + content.length, "\"sum\":" + java.util.Arrays.hashCode(content));
+
+        // other requests are still limited
+        HttpResponse<String> large = browser.send(HttpRequest.newBuilder(uri("/api/sessions/abc/prompt"))
+            .header("X-BobCrew", "1")
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofByteArray(content))
+            .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(large.statusCode()).isEqualTo(413);
+
+        // and an upload needs the page's header like any change
+        assertThat(browser.send(HttpRequest.newBuilder(uri("/api/sessions/abc/files?path=x"))
+            .PUT(HttpRequest.BodyPublishers.ofByteArray(new byte[1]))
+            .build(), HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(403);
     }
 
     private HttpResponse<String> post(String path, String body) throws Exception {

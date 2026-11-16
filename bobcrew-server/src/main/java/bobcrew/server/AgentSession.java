@@ -1,5 +1,11 @@
 package bobcrew.server;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -42,8 +48,13 @@ final class AgentSession {
     }
 
     /** What clients see of a session. */
-    record Info(String id, String owner, String title, String image, String containerId, Status status,
-            String agent, String currentMode, List<Mode> modes, Instant createdAt, Instant updatedAt, long lastSeq) {
+    record Info(String id, String owner, String title, String image, String containerId, GitRepository repository,
+            Status status, String agent, String currentMode, List<Mode> modes, Instant createdAt, Instant updatedAt,
+            long lastSeq) {
+    }
+
+    /** A file a user put in the workspace. */
+    record Upload(String path, long size) {
     }
 
     record Mode(String id, String name) {
@@ -67,6 +78,8 @@ final class AgentSession {
     private final String title;
 
     private final DockerRuntime.ContainerSpec spec;
+
+    private final GitRepository repository;
 
     private final DockerRuntime docker;
 
@@ -96,11 +109,19 @@ final class AgentSession {
 
     private volatile boolean firstPrompt = true;
 
-    AgentSession(DockerRuntime.ContainerSpec spec, String title, DockerRuntime docker, BobCrewProperties properties) {
+    /** Whether the repository is in the workspace: cloned, and not wiped since. */
+    private volatile boolean repositoryPresent;
+
+    /**
+     * @param repository cloned into the workspace when the session starts, or null
+     */
+    AgentSession(DockerRuntime.ContainerSpec spec, GitRepository repository, String title, DockerRuntime docker,
+            BobCrewProperties properties) {
         this.id = spec.sessionId();
         this.owner = spec.owner();
         this.title = title;
         this.spec = spec;
+        this.repository = repository;
         this.docker = docker;
         this.properties = properties;
         this.events = new EventLog(properties.eventBufferSize());
@@ -131,14 +152,15 @@ final class AgentSession {
     }
 
     Info info() {
-        return new Info(id, owner, title, spec.image(), DockerRuntime.shortId(containerId), status, agentName,
+        return new Info(id, owner, title, spec.image(), DockerRuntime.shortId(containerId), repository, status, agentName,
                 currentMode, modes, createdAt, updatedAt, events.lastSeq());
     }
 
     /**
-     * Creates and starts the agent's container, initializes ACP and creates the agent's session.
-     * @throws ApiException with 400 if the image is not on the server, 502 if the agent cannot be started or
-     * refuses the session
+     * Creates and starts the agent's container, initializes ACP, clones the repository if there is one, and
+     * creates the agent's session (after the clone, so the agent sees the repository from the start).
+     * @throws ApiException with 400 if the image is not on the server or the repository cannot be cloned, 502 if
+     * the agent cannot be started or refuses the session
      */
     void start() {
         try {
@@ -160,6 +182,17 @@ final class AgentSession {
             if (initialized.agentInfo() != null) {
                 AcpSchema.Implementation info = initialized.agentInfo();
                 this.agentName = (info.title() != null ? info.title() : info.name()) + " " + info.version();
+            }
+            if (repository != null) {
+                docker.cloneRepository(created, repository, properties.git().cloneTimeout());
+                repositoryPresent = true;
+                Map<String, Object> cloned = new LinkedHashMap<>();
+                cloned.put("url", repository.url());
+                if (repository.branch() != null) {
+                    cloned.put("branch", repository.branch());
+                }
+                cloned.put("path", repository.path());
+                events.append(UiEvent.REPOSITORY_CLONED, null, cloned);
             }
             useSession(newClient.newSession(new AcpSchema.NewSessionRequest(DockerRuntime.WORKSPACE, List.of())));
         } catch (ApiException e) {
@@ -211,6 +244,7 @@ final class AgentSession {
         }
         try {
             if (wipeWorkspace) {
+                repositoryPresent = false;
                 docker.wipeWorkspace(containerId);
             }
             AcpSchema.NewSessionResponse created;
@@ -285,15 +319,26 @@ final class AgentSession {
         }
     }
 
+    /**
+     * The first prompt of a conversation carries notes about the environment: how to share files, and where
+     * the repository the session was created with is checked out.
+     */
     private List<AcpSchema.ContentBlock> buildPromptContents(String text, boolean isFirst) {
+        StringBuilder notes = new StringBuilder();
         if (isFirst && properties.fileDownloadsEnabled()) {
-            return List.of(
-                new AcpSchema.TextContent(
-                    "[Instructions: You can share files from the workspace with the user by replying with a file URL (for example file:///opt/workspace/path/to/file or file://relative/path). The user interface will make it clickable for download.]\n\n"
-                    + text)
-            );
+            notes.append("[Instructions: You can share files from the workspace with the user by replying with a file URL (for example file:///opt/workspace/path/to/file or file://relative/path). The user interface will make it clickable for download.]\n\n");
         }
-        return List.of(new AcpSchema.TextContent(text));
+        if (isFirst && repositoryPresent) {
+            notes.append(repositoryNote()).append("\n\n");
+        }
+        return List.of(new AcpSchema.TextContent(notes + text));
+    }
+
+    String repositoryNote() {
+        return "[Note: the git repository " + repository.url()
+                + (repository.branch() == null ? " (default branch)" : " (branch " + repository.branch() + ")")
+                + " has been cloned into " + repository.path()
+                + ". It is a shallow clone (depth 1, that branch only): run `git fetch --unshallow` if you need its history.]";
     }
 
     void setMode(String modeId) {
@@ -347,6 +392,54 @@ final class AgentSession {
             throw new ApiException(HttpStatus.CONFLICT, "The session has no container");
         }
         return docker.readFile(current, target);
+    }
+
+    /**
+     * Writes a file into the workspace, replacing one already there, and records a
+     * {@link UiEvent#FILE_UPLOADED} event. The content is read whole into a temporary file first, because the
+     * write in the container must know its exact size (see {@link DockerRuntime#writeFile}).
+     * @param path a client path; it goes through {@link ContainerPaths}
+     * @throws ApiException 413 if the content is larger than {@code maxSize}, 409 if the session is not open
+     */
+    Upload upload(String user, String path, InputStream content, long maxSize) throws IOException {
+        String target = ContainerPaths.resolve(path);
+        requireOpen();
+        Path spool = Files.createTempFile("bobcrew-upload-", ".tmp");
+        try {
+            long size;
+            try (OutputStream out = Files.newOutputStream(spool)) {
+                size = copyAtMost(content, out, maxSize);
+            }
+            if (size < 0) {
+                throw new ApiException(HttpStatus.CONTENT_TOO_LARGE, "The file is larger than the server accepts ("
+                        + maxSize / (1024 * 1024) + " MB)");
+            }
+            requireOpen();
+            try (InputStream in = Files.newInputStream(spool)) {
+                docker.writeFile(containerId, target, in, size, Duration.ofMinutes(10));
+            }
+            events.append(UiEvent.FILE_UPLOADED, user, Map.of("path", target, "size", size));
+            touch();
+            log.info("Session {}: {} uploaded {} ({} bytes)", id, user, target, size);
+            return new Upload(target, size);
+        } finally {
+            Files.deleteIfExists(spool);
+        }
+    }
+
+    /** Copies everything, or returns -1 as soon as there is more than {@code max} bytes. */
+    private static long copyAtMost(InputStream in, OutputStream out, long max) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        long total = 0;
+        int read;
+        while ((read = in.read(buffer)) >= 0) {
+            total += read;
+            if (total > max) {
+                return -1;
+            }
+            out.write(buffer, 0, read);
+        }
+        return total;
     }
 
     /** Closes the session and removes its container. */

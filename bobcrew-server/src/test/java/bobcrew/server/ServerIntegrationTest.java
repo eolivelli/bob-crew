@@ -87,6 +87,7 @@ class ServerIntegrationTest {
         registry.add("bobcrew.max-sessions", () -> "3");
         registry.add("bobcrew.permission-timeout", () -> "2s");
         registry.add("bobcrew.agent.api-key", () -> API_KEY);
+        registry.add("bobcrew.max-upload-size", () -> "1MB");
     }
 
     @LocalServerPort
@@ -484,6 +485,140 @@ class ServerIntegrationTest {
             .isEqualTo(404);
     }
 
+    // ---- repositories ------------------------------------------------------
+
+    @Test
+    void clonesTheRepositoryAndTellsTheAgentOnTheFirstPrompt() throws Exception {
+        JsonNode session = create(Map.of("repository", Map.of("url", TestDocker.SAMPLE_REPOSITORY, "branch", "feature")));
+        String id = session.get("id").asString();
+        String container = session.get("containerId").asString();
+        assertThat(session.get("repository").get("url").asString()).isEqualTo(TestDocker.SAMPLE_REPOSITORY);
+        assertThat(session.get("repository").get("branch").asString()).isEqualTo("feature");
+        assertThat(session.get("repository").get("directory").asString()).isEqualTo("sample");
+
+        assertThat(exists(container, "/opt/workspace/sample/FEATURE.md")).as("the branch is checked out").isTrue();
+        assertThat(exists(container, "/opt/workspace/sample/.git/shallow")).as("a shallow clone").isTrue();
+        assertThat(execOutput(container, "stat", "-c", "%u", "/opt/workspace/sample/README.md").strip())
+            .as("owned by the session's user").isEqualTo("1000");
+
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"first\"}", alice);
+        List<JsonNode> first = events(id, 0, event -> "turn_end".equals(event.get("type").asString()));
+        JsonNode cloned = first(first, "repository_cloned");
+        assertThat(cloned.get("data").get("path").asString()).isEqualTo("/opt/workspace/sample");
+        assertThat(agentText(first)).contains("has been cloned into /opt/workspace/sample", "(branch feature)",
+                "shallow clone");
+        assertThat(first(first, "user_prompt").get("data").get("text").asString())
+            .as("the note is not shown as the user's text").isEqualTo("first");
+
+        long seen = first.get(first.size() - 1).get("seq").asLong();
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"second\"}", alice);
+        assertThat(agentText(events(id, seen, event -> "turn_end".equals(event.get("type").asString()))))
+            .isEqualTo("You said: second ");
+    }
+
+    @Test
+    void clonesTheDefaultBranchWhenNoneIsGiven() throws Exception {
+        JsonNode session = create(Map.of("repository", Map.of("url", TestDocker.SAMPLE_REPOSITORY)));
+        String container = session.get("containerId").asString();
+        assertThat(exists(container, "/opt/workspace/sample/README.md")).isTrue();
+        assertThat(exists(container, "/opt/workspace/sample/FEATURE.md")).isFalse();
+    }
+
+    @Test
+    void refusesBadRepositoriesAndLeavesNoContainer() throws Exception {
+        for (Map<String, String> repository : List.of(
+                Map.of("url", "http://example.com/repo.git"),
+                Map.of("url", "ssh://git@example.com/repo.git"),
+                Map.of("url", "https://user:secret@example.com/repo.git"),
+                Map.of("url", "https://example.com/repo.git?x=1"),
+                Map.of("url", "not a url"),
+                Map.of("url", TestDocker.SAMPLE_REPOSITORY, "branch", "--upload-pack=touch /tmp/x"),
+                Map.of("url", TestDocker.SAMPLE_REPOSITORY, "branch", "a..b"),
+                Map.of("url", "", "branch", "main"))) {
+            assertThat(createStatus(Map.of("repository", repository))).as(repository.toString()).isEqualTo(400);
+        }
+        HttpResponse<String> missing = send("POST", "/sessions", JSON.writeValueAsString(Map.of("repository",
+                Map.of("url", TestDocker.SAMPLE_REPOSITORY, "branch", "no-such-branch"))), alice);
+        assertThat(missing.statusCode()).isEqualTo(400);
+        assertThat(JSON.readTree(missing.body()).get("error").asString()).contains("could not be cloned", "no-such-branch");
+        assertThat(JSON.readTree(send("GET", "/sessions", null, alice).body())).isEmpty();
+        assertThat(TestDocker.client().listContainersCmd().withShowAll(true)
+            .withLabelFilter(Map.of(DockerRuntime.LABEL_INSTANCE, instanceId)).exec())
+            .as("refused sessions leave no container").isEmpty();
+    }
+
+    @Test
+    void wipingTheWorkspaceDropsTheRepositoryNote() throws Exception {
+        JsonNode session = create(Map.of("repository", Map.of("url", TestDocker.SAMPLE_REPOSITORY)));
+        String id = session.get("id").asString();
+        assertThat(send("POST", "/sessions/" + id + "/clear", "{\"wipeWorkspace\":false}", alice).statusCode())
+            .isEqualTo(200);
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"kept\"}", alice);
+        assertThat(agentText(events(id, 0, event -> "turn_end".equals(event.get("type").asString()))))
+            .as("the repository is still there after a clear that keeps files").contains("has been cloned");
+
+        assertThat(send("POST", "/sessions/" + id + "/clear", null, alice).statusCode()).isEqualTo(200);
+        assertThat(exists(session.get("containerId").asString(), "/opt/workspace/sample")).isFalse();
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"wiped\"}", alice);
+        assertThat(agentText(events(id, 0, event -> "turn_end".equals(event.get("type").asString()))))
+            .isEqualTo("You said: wiped ");
+    }
+
+    // ---- uploads -----------------------------------------------------------
+
+    @Test
+    void uploadsAFileIntoTheWorkspace() throws Exception {
+        JsonNode session = createSession(null);
+        String id = session.get("id").asString();
+        String container = session.get("containerId").asString();
+
+        HttpResponse<String> response = upload(id, "docs/notes%20one.txt", "first line\nsecond line\n".getBytes(StandardCharsets.UTF_8));
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(201);
+        JsonNode uploaded = JSON.readTree(response.body());
+        assertThat(uploaded.get("path").asString()).isEqualTo("/opt/workspace/docs/notes one.txt");
+        assertThat(uploaded.get("size").asLong()).isEqualTo(23);
+        assertThat(execOutput(container, "cat", "/opt/workspace/docs/notes one.txt")).isEqualTo("first line\nsecond line\n");
+        assertThat(execOutput(container, "stat", "-c", "%u", "/opt/workspace/docs/notes one.txt").strip())
+            .as("written by the session's user").isEqualTo("1000");
+
+        // replacing, an empty file, and an absolute path inside the workspace
+        assertThat(upload(id, "/opt/workspace/docs/notes%20one.txt", "new".getBytes(StandardCharsets.UTF_8)).statusCode())
+            .isEqualTo(201);
+        assertThat(execOutput(container, "cat", "/opt/workspace/docs/notes one.txt")).isEqualTo("new");
+        assertThat(upload(id, "empty", new byte[0]).statusCode()).isEqualTo(201);
+        assertThat(exists(container, "/opt/workspace/empty")).isTrue();
+
+        List<JsonNode> events = events(id, 0, event -> "file_uploaded".equals(event.get("type").asString())
+                && event.get("data").get("path").asString().equals("/opt/workspace/empty"));
+        JsonNode first = first(events, "file_uploaded");
+        assertThat(first.get("user").asString()).isEqualTo("alice");
+        assertThat(first.get("data").get("size").asLong()).isEqualTo(23);
+    }
+
+    @Test
+    void refusesUploadsOutsideTheWorkspaceOntoLinksAndTooLarge() throws Exception {
+        JsonNode session = createSession(null);
+        String id = session.get("id").asString();
+        byte[] small = "x".getBytes(StandardCharsets.UTF_8);
+        assertThat(upload(id, "../../etc/evil", small).statusCode()).isEqualTo(400);
+        assertThat(upload(id, "/etc/evil", small).statusCode()).isEqualTo(400);
+        assertThat(upload(id, "", small).statusCode()).isEqualTo(400);
+
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"makelink\"}", alice);
+        events(id, 0, event -> "turn_end".equals(event.get("type").asString()));
+        assertThat(upload(id, "out/link", small).statusCode()).as("a symbolic link").isEqualTo(400);
+        assertThat(upload(id, "out", small).statusCode()).as("a directory").isEqualTo(400);
+        assertThat(execOutput(session.get("containerId").asString(), "cat", "/etc/passwd")).doesNotStartWith("x");
+
+        HttpResponse<String> large = upload(id, "large.bin", new byte[1024 * 1024 + 1]);
+        assertThat(large.statusCode()).isEqualTo(413);
+        assertThat(exists(session.get("containerId").asString(), "/opt/workspace/large.bin")).isFalse();
+        assertThat(upload("no-such-session", "a.txt", small).statusCode()).isEqualTo(404);
+        assertThat(http.send(request("/sessions/" + id + "/files?path=a.txt", null)
+            .PUT(HttpRequest.BodyPublishers.ofByteArray(small)).build(), HttpResponse.BodyHandlers.ofString())
+            .statusCode()).isEqualTo(401);
+    }
+
     @Test
     void downloadingFilesWhenDisabledReturnsForbidden() throws Exception {
         String id = createSession(null).get("id").asString();
@@ -555,6 +690,34 @@ class ServerIntegrationTest {
             created.add(JSON.readTree(response.body()).get("id").asString());
         }
         return response.statusCode();
+    }
+
+    private HttpResponse<String> upload(String id, String encodedPath, byte[] content) throws Exception {
+        return http.send(request("/sessions/" + id + "/files?path=" + encodedPath, alice)
+            .PUT(HttpRequest.BodyPublishers.ofByteArray(content))
+            .header("Content-Type", "application/octet-stream")
+            .build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** What a command run in a container prints on its standard output. */
+    private static String execOutput(String container, String... command) throws Exception {
+        String exec = TestDocker.client().execCreateCmd(container).withCmd(command)
+            .withAttachStdout(true).withAttachStderr(true).exec().getId();
+        StringBuilder output = new StringBuilder();
+        TestDocker.client().execStartCmd(exec).exec(new com.github.dockerjava.api.async.ResultCallback.Adapter<
+                com.github.dockerjava.api.model.Frame>() {
+            @Override
+            public void onNext(com.github.dockerjava.api.model.Frame frame) {
+                if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDOUT) {
+                    synchronized (output) {
+                        output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                    }
+                }
+            }
+        }).awaitCompletion(30, TimeUnit.SECONDS);
+        synchronized (output) {
+            return output.toString();
+        }
     }
 
     /** Whether a path exists in a container, checked with {@code test -e} run in it. */

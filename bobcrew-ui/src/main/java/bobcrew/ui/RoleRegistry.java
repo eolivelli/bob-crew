@@ -25,7 +25,10 @@ import org.springframework.stereotype.Component;
  * <li>{@code name}, {@code description}: what the user sees;</li>
  * <li>{@code image}: the Docker image the session runs in (otherwise the server's default image);</li>
  * <li>{@code env}: names of environment variables, separated by commas or spaces, whose values this UI app
- * passes from its own environment to the session's container (never to the browser).</li>
+ * passes from its own environment to the session's container (never to the browser);</li>
+ * <li>{@code repository}, {@code branch}: an https git repository that the server clones (shallow, that branch
+ * only, or the default branch when none is given) into the workspace before the agent starts; the first prompt
+ * then tells the agent where it is.</li>
  * </ul>
  *
  * <p>The directory is read on every call so that edits show up without restarting the UI. Role ids come from
@@ -38,16 +41,23 @@ class RoleRegistry {
 
     /**
      * A role as shown to the user. {@code manifest} is the file as written, {@code prompt} its body; {@code image}
-     * is null when the role names none, {@code env} holds variable names only.
+     * is null when the role names none, {@code env} holds variable names only; {@code repository} and
+     * {@code branch} are null when not given.
      */
     record Role(String id, String name, String description, String prompt, String manifest, String image,
-            List<String> env) {
+            List<String> env, String repository, String branch) {
     }
 
     static final Pattern ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,99}");
 
     /** What a Docker image reference may look like; the server checks again. */
     static final Pattern IMAGE = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}");
+
+    /** A repository URL: https, no credentials, no spaces; the server checks it fully. */
+    static final Pattern REPOSITORY = Pattern.compile("https://[^\\s@?#]{1,2000}");
+
+    /** A branch name; the server checks it fully. */
+    static final Pattern BRANCH = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._/+-]{0,199}");
 
     /** An environment variable name. */
     static final Pattern ENV_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]{0,127}");
@@ -131,6 +141,8 @@ class RoleRegistry {
         String name = null;
         String description = "";
         String image = null;
+        String repository = null;
+        String branch = null;
         List<String> env = new ArrayList<>();
         String body = text;
 
@@ -161,6 +173,18 @@ class RoleRegistry {
                         } else {
                             log.warn("Role {}: ignoring the invalid image name", id);
                         }
+                    } else if (key.equals("repository")) {
+                        if (REPOSITORY.matcher(value).matches()) {
+                            repository = value;
+                        } else {
+                            log.warn("Role {}: ignoring the repository, which must be an https URL without credentials", id);
+                        }
+                    } else if (key.equals("branch")) {
+                        if (BRANCH.matcher(value).matches() && !value.contains("..")) {
+                            branch = value;
+                        } else {
+                            log.warn("Role {}: ignoring the invalid branch name", id);
+                        }
                     } else if (key.equals("env")) {
                         for (String variable : value.split("[,\\s]+")) {
                             if (variable.isEmpty()) {
@@ -184,8 +208,12 @@ class RoleRegistry {
         if (prompt.isEmpty()) {
             return null;
         }
+        if (repository == null && branch != null) {
+            log.warn("Role {}: ignoring the branch, since there is no repository", id);
+            branch = null;
+        }
         return new Role(id, name == null || name.isBlank() ? id : name, description, prompt, manifest, image,
-                List.copyOf(env));
+                List.copyOf(env), repository, branch);
     }
 
     private static String unquote(String value) {

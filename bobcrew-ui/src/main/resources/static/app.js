@@ -10,6 +10,7 @@ const state = {
   servers: [],          // list of configured servers [{name, url}]
   roles: [],            // available roles [{id, name, description, image, env}]
   metricsTimer: null,   // refreshes the metrics panel while it is open
+  uploading: false,     // an upload is in progress
   sessions: [],
   current: null,        // id of the selected session
   source: null,         // its EventSource
@@ -35,11 +36,14 @@ function sessionApi(subPath) {
 
 // Returns the response; throws with the server's message when it is not a success.
 async function call(method, path, body) {
-  const response = await fetch('/api' + path, {
+  return checked(await fetch('/api' + path, {
     method,
     headers: { 'X-BobCrew': '1', ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
-  });
+  }));
+}
+
+async function checked(response) {
   if (!response.ok) {
     let message = response.status + ' ' + response.statusText;
     try {
@@ -106,7 +110,9 @@ async function refreshRoles() {
     const option = el('option', '', role.name);
     option.value = role.id;
     option.title = [role.description, role.image ? 'image ' + role.image : '',
-      role.env && role.env.length ? 'env ' + role.env.join(', ') : ''].filter(Boolean).join(' · ');
+      role.env && role.env.length ? 'env ' + role.env.join(', ') : '',
+      role.repository ? 'clones ' + role.repository + (role.branch ? ' (' + role.branch + ')' : '') : '']
+      .filter(Boolean).join(' · ');
     return option;
   }));
   if (state.roles.some((role) => role.id === prev)) dropdown.value = prev;
@@ -164,6 +170,8 @@ function showHeader(session) {
   const serverInfo = session.server ? ` · server ${session.server}` : '';
   $('session-meta').textContent =
     `${session.agent || 'agent'}${serverInfo} · image ${session.image}`
+    + (session.repository ? ` · repository ${session.repository.url}`
+      + (session.repository.branch ? ` (${session.repository.branch})` : '') : '')
     + `${session.containerId ? ' · container ' + session.containerId : ''} · owner ${session.owner}`;
   setStatus(session.status);
   const select = $('session-mode');
@@ -186,6 +194,7 @@ function setStatus(status) {
   $('cancel').disabled = status !== 'RUNNING';
   $('clear').disabled = status !== 'IDLE';
   $('metrics-toggle').disabled = status === 'CLOSED';
+  $('upload').disabled = !open || state.uploading;
   $('session-mode').disabled = !open;
 }
 
@@ -273,6 +282,10 @@ function render(event) {
     case 'error':
       state.streaming = null;
       add(linked('div', 'msg error', data.message || 'Error'));
+      break;
+    case 'file_uploaded':
+    case 'repository_cloned':
+      add(el('div', 'divider', workspaceEventText(event)));
       break;
     default: break;
   }
@@ -424,6 +437,8 @@ $('new-session').addEventListener('submit', async (submit) => {
     const roleId = $('new-role').value;
     // fetched first, so that a vanished role stops us before a session is created
     const role = roleId ? await api('GET', `/roles/${encodeURIComponent(roleId)}`) : null;
+    // the server clones the role's repository before it answers, which can take a while
+    button.textContent = role && role.repository ? 'Cloning the repository…' : 'Starting…';
     const createPath = server ? `/servers/${encodeURIComponent(server)}/sessions` : '/sessions';
     // the UI app turns the role into the image and environment variables; their values never come here
     const response = await call('POST', createPath,
@@ -449,6 +464,7 @@ $('new-session').addEventListener('submit', async (submit) => {
     notify(e.message);
   } finally {
     button.disabled = false;
+    button.textContent = 'New session';
   }
 });
 
@@ -515,6 +531,68 @@ $('clear-dialog').addEventListener('close', async () => {
   } catch (e) {
     notify(e.message);
   }
+});
+
+// ---- file uploads ---------------------------------------------------------
+
+// Uploads one file at a time; each goes to <folder>/<file name> in the workspace, replacing a file there.
+async function uploadFiles(files, folder) {
+  if (!currentSession() || !files.length || state.uploading) return;
+  const base = (folder || '').trim().replace(/\/+$/, '');
+  const sessionPath = sessionApi('/files');
+  state.uploading = true;
+  $('upload').disabled = true;
+  const done = [];
+  try {
+    for (const file of files) {
+      $('upload').textContent = `Uploading ${done.length + 1}/${files.length}…`;
+      const path = base ? `${base}/${file.name}` : file.name;
+      try {
+        await checked(await fetch(`/api${sessionPath}?path=${encodeURIComponent(path)}`, {
+          method: 'PUT',
+          headers: { 'X-BobCrew': '1', 'Content-Type': 'application/octet-stream' },
+          body: file,
+        }));
+        done.push(file.name);
+      } catch (e) {
+        notify(`${file.name} was not uploaded: ${e.message}`
+          + (done.length ? ` (uploaded before it: ${done.join(', ')})` : ''));
+        return;
+      }
+    }
+  } finally {
+    state.uploading = false;
+    $('upload').textContent = 'Upload files';
+    const session = currentSession();
+    if (session) setStatus(session.status);
+  }
+}
+
+$('upload').addEventListener('click', () => {
+  if (!currentSession()) return;
+  $('upload-files').value = '';
+  const dialog = $('upload-dialog');
+  dialog.returnValue = 'cancel';
+  dialog.showModal();
+});
+
+$('upload-dialog').addEventListener('close', () => {
+  if ($('upload-dialog').returnValue !== 'upload') return;
+  uploadFiles([...$('upload-files').files], $('upload-folder').value);
+});
+
+// files dropped on the conversation go to the top of the workspace
+$('transcript').addEventListener('dragover', (drag) => {
+  if (!currentSession() || $('upload').disabled || !drag.dataTransfer.types.includes('Files')) return;
+  drag.preventDefault();
+  $('transcript').classList.add('dropping');
+});
+$('transcript').addEventListener('dragleave', () => $('transcript').classList.remove('dropping'));
+$('transcript').addEventListener('drop', (drop) => {
+  $('transcript').classList.remove('dropping');
+  if (!currentSession() || $('upload').disabled) return;
+  drop.preventDefault();
+  uploadFiles([...drop.dataTransfer.files], '');
 });
 
 // ---- container metrics ----------------------------------------------------
@@ -656,7 +734,9 @@ async function showRole(id, item) {
     $('role-name').textContent = `${role.name} (${role.id})`;
     $('role-description').textContent = [role.description,
       `Image: ${role.image || "the server's default"}`,
-      `Environment passed from this computer: ${role.env && role.env.length ? role.env.join(', ') : 'none'}`]
+      `Environment passed from this computer: ${role.env && role.env.length ? role.env.join(', ') : 'none'}`,
+      ...(role.repository ? [`Repository cloned into the workspace: ${role.repository}`
+        + (role.branch ? ` (branch ${role.branch})` : ' (default branch)')] : [])]
       .filter(Boolean).join(' · ');
     $('role-manifest').textContent = role.manifest;
   } catch (e) {

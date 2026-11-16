@@ -51,6 +51,14 @@ const midClear = ctx.buildTranscriptHtml(session, [...events, ev(30, 'cleared', 
   { exportedAt: new Date(), exportedBy: '' });
 assert(!midClear.includes('hello') && !midClear.includes('Plan') && midClear.includes('later'), 'history before a clear is dropped');
 
+// uploads and the clone show as one-line dividers, escaped
+const workspace = ctx.buildTranscriptHtml({ ...session, repository: { url: 'https://github.com/a/<b>', branch: 'main' } }, [
+  ev(1, 'repository_cloned', { url: 'https://github.com/a/<b>', branch: 'main', path: '/opt/workspace/b' }),
+  ev(2, 'file_uploaded', { path: '/opt/workspace/<x>.txt', size: 2048 }, 'alice')], { exportedAt: new Date(), exportedBy: '' });
+assert(workspace.includes('cloned https://github.com/a/&lt;b&gt; (branch main) into /opt/workspace/b'));
+assert(workspace.includes('alice uploaded /opt/workspace/&lt;x&gt;.txt (2.0 KiB)'));
+assert(workspace.includes('repository https://github.com/a/&lt;b&gt; (main)'));
+
 ctx.gzipText(html).then(async (blob) => {
   const back = zlib.gunzipSync(Buffer.from(await blob.arrayBuffer())).toString('utf8');
   assert.strictEqual(back, html);

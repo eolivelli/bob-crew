@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -16,6 +17,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -35,13 +37,17 @@ class SessionController {
     private static final Duration KEEPALIVE = Duration.ofSeconds(15);
 
     /** {@code env} values are secrets as far as the server is concerned: never logged or returned. */
-    record CreateRequest(String title, String image, Map<String, String> env) {
+    record CreateRequest(String title, String image, Map<String, String> env, RepositoryRequest repository) {
 
         @Override
         public String toString() {
             return "CreateRequest[title=" + title + ", image=" + image + ", env="
-                    + (env == null ? "{}" : env.keySet()) + "]";
+                    + (env == null ? "{}" : env.keySet()) + ", repository=" + repository + "]";
         }
+    }
+
+    /** A repository to clone into the new session's workspace; no branch means the default one. */
+    record RepositoryRequest(String url, String branch) {
     }
 
     record ClearRequest(Boolean wipeWorkspace) {
@@ -85,7 +91,10 @@ class SessionController {
         if (title != null && title.length() > 200) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "The title is too long");
         }
-        return sessions.create(principal.getName(), title, request.image(), request.env()).info();
+        GitRepository repository = request.repository() == null ? null
+                : GitRepository.of(request.repository().url(), request.repository().branch(),
+                        properties.git().allowedSchemes());
+        return sessions.create(principal.getName(), title, request.image(), request.env(), repository).info();
     }
 
     @GetMapping("/sessions/{id}")
@@ -110,6 +119,26 @@ class SessionController {
             response.setContentLengthLong(file.size());
             file.content().transferTo(response.getOutputStream());
         }
+    }
+
+    /**
+     * Puts the request body into the session's workspace at {@code path} (relative to the workspace, or absolute
+     * inside it), creating directories and replacing a file already there.
+     */
+    @PutMapping("/sessions/{id}/files")
+    @ResponseStatus(HttpStatus.CREATED)
+    AgentSession.Upload upload(@PathVariable String id, @RequestParam(value = "path", required = false) String path,
+            Principal principal, HttpServletRequest request) throws IOException {
+        if (!properties.fileUploadsEnabled()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "File uploads are disabled on this server");
+        }
+        long max = properties.maxUploadSize().toBytes();
+        if (request.getContentLengthLong() > max) {
+            throw new ApiException(HttpStatus.CONTENT_TOO_LARGE, "The file is larger than the server accepts ("
+                    + max / (1024 * 1024) + " MB)");
+        }
+        AgentSession session = sessions.get(principal.getName(), id);
+        return session.upload(principal.getName(), path, request.getInputStream(), max);
     }
 
     /** A snapshot of the session container's resource use; Docker samples for a second or two. */

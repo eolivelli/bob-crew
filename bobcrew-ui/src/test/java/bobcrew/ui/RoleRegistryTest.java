@@ -53,6 +53,29 @@ class RoleRegistryTest {
     }
 
     @Test
+    void readsTheRepositoryAndBranch() {
+        RoleRegistry.Role role = RoleRegistry.parse("c",
+                "---\nrepository: https://github.com/datastax/cassandra\nbranch: release/5.0\n---\nGo.\n");
+        assertThat(role.repository()).isEqualTo("https://github.com/datastax/cassandra");
+        assertThat(role.branch()).isEqualTo("release/5.0");
+
+        RoleRegistry.Role noBranch = RoleRegistry.parse("c", "---\nrepository: https://github.com/a/b.git\n---\nGo.\n");
+        assertThat(noBranch.repository()).isEqualTo("https://github.com/a/b.git");
+        assertThat(noBranch.branch()).isNull();
+
+        for (String bad : new String[] {"http://github.com/a/b", "https://user:tok@github.com/a/b", "git@github.com:a/b",
+                "https://github.com/a b"}) {
+            assertThat(RoleRegistry.parse("c", "---\nrepository: " + bad + "\nbranch: main\n---\nGo.\n"))
+                .as(bad).satisfies(r -> {
+                    assertThat(r.repository()).isNull();
+                    assertThat(r.branch()).as("no branch without a repository").isNull();
+                });
+        }
+        assertThat(RoleRegistry.parse("c", "---\nrepository: https://github.com/a/b\nbranch: --upload-pack=x\n---\nGo.\n")
+            .branch()).isNull();
+    }
+
+    @Test
     void ignoresAnInvalidImageName() throws Exception {
         Files.writeString(directory.resolve("odd.md"), "---\nimage: \"not an image; rm -rf /\"\n---\nGo.\n");
         assertThat(registry().get("odd").orElseThrow().image()).isNull();

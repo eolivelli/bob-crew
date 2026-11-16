@@ -44,5 +44,8 @@ The subagent review needs a server that runs Bob with subagents enabled: the def
 The image must be on the server's Docker: `scripts/build-images.sh --only java-python`, then
 `scripts/push-images.sh user@host bobcrew/bob-java-python:latest` if the server is elsewhere.
 
-Copy the role to make others: change `name`, `image`, `env` and the prompt. See "Roles" in the main
+Copy the role to make others: change `name`, `image`, `env` and the prompt. To start each session with a
+repository checked out, add `repository: https://github.com/<owner>/<repo>` and optionally `branch: <name>`
+to the front matter: the server clones it (shallow) into `/opt/workspace/<repo>` before the agent starts, and
+tells the agent so in the first prompt. With `GH_TOKEN` set, private GitHub repositories work too. See "Roles" in the main
 README for the manifest format.

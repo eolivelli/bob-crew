@@ -191,13 +191,36 @@ told to work per ticket with unit tests, the ticket id in commit messages, and a
 patch before committing (which needs a server running Bob without `--disable-subagents`).
 
 The front matter is optional. It understands `name` (default: the id), `description`, `image` (default:
-the server's `bobcrew.docker.default-image`) and `env`: names of environment variables, separated by
-commas or spaces. When a session is created with the role, the UI app reads those variables from **its
+the server's `bobcrew.docker.default-image`), `repository` and `branch` (below), and `env`: names of
+environment variables, separated by commas or spaces. When a session is created with the role, the UI app reads those variables from **its
 own** environment (the laptop's, not the server's) and passes them to the session's container; the
 values never go through the browser, and a variable that is not set is left out (the page says which).
 The browser cannot choose an image or variables without a role. The rest of the file is the prompt. Files that are not `.md`, are symbolic links, are larger than 64 KiB, have an
 empty prompt, or come after the first 200 are ignored (a warning is logged). The directory is read on every
 request, so changes show up without restarting the UI.
+
+A role can start every session with a repository checked out:
+
+```
+---
+name: Cassandra developer
+image: bobcrew/bob-java-python:latest
+env: GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL
+repository: https://github.com/datastax/cassandra
+branch: main
+---
+...
+```
+
+When the session is created, the server clones the repository into the workspace, at
+`/opt/workspace/<name>` (`cassandra` here): a shallow clone (`--depth 1`) of that branch only, or of the
+default branch when `branch` is left out. It runs `git` in the container as the session's user, through
+the image's entrypoint, so with bob-base a `GH_TOKEN` among the role's variables also opens private
+GitHub repositories. Session creation waits for the clone (up to `bobcrew.git.clone-timeout`, 10 minutes)
+and fails, leaving nothing behind, if git does. The first prompt then carries a short note telling the
+agent where the repository is and that it is shallow; the note is not shown as part of the user's text,
+and it is left out after a **Clear** that deleted the workspace. Only `https://` URLs are accepted, never with
+credentials in them.
 
 When creating a session, the **Role** list next to the title (shown when there are roles) can pick
 one: once the session exists, the UI sends the role's prompt to it as the first prompt, and a blank title becomes
@@ -211,6 +234,15 @@ the browser from the events the page has received, so it contains what the serve
 last `bobcrew.event-buffer-size` events (5000 by default), and the page says so when the start of a
 session is missing. The file has no scripts and carries a Content-Security-Policy that blocks all
 network access.
+
+## Uploading files
+
+**Upload files** in a session's header picks one or more files from your computer and puts them in the
+session's workspace, in `/opt/workspace` or a folder below it (created if needed); dropping files on the
+conversation uploads them to `/opt/workspace` directly. A file of the same name is replaced. The files are
+written by the session's own (non-root) user, so they land only where the agent itself could write, and
+never through a symbolic link. Every upload shows in the conversation with who made it. The limit is
+`bobcrew.max-upload-size` (100 MB) per file; `BOBCREW_FILE_UPLOADS_ENABLED=false` turns uploads off.
 
 ## Clearing a session and container metrics
 
@@ -232,6 +264,8 @@ Set as environment variables, or as the Spring properties in
 | `BOBCREW_JWT_SECRET_FILE` | none, required | File with the HS256 secret, at least 32 bytes |
 | `BOBCREW_REVOKED_JTI_FILE` | none | File listing revoked token ids, one per line |
 | `BOBCREW_FILE_DOWNLOADS_ENABLED` | `false` | Whether clients may download files from a session's workspace |
+| `BOBCREW_FILE_UPLOADS_ENABLED` | `true` | Whether clients may upload files into a session's workspace |
+| `BOBCREW_MAX_UPLOAD_SIZE` | `100MB` | Largest file a client may upload |
 | `BOBCREW_AGENT_COMMAND` | `bob,acp,--trust,--accept-license,--disable-mcp,--disable-subagents` | The command run in each container, comma separated |
 | `BOB_API_KEY` | none | Passed to the container as `BOB_API_KEY` and `BOBSHELL_API_KEY` |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | The Docker daemon |
@@ -244,7 +278,8 @@ Further properties: `bobcrew.max-sessions` (8), `bobcrew.request-timeout` (30s),
 `bobcrew.event-buffer-size` (5000), and per container `bobcrew.docker.user` (`1000:1000`, never root),
 `bobcrew.docker.memory-limit` (4GB), `bobcrew.docker.cpus` (2), `bobcrew.docker.pids-limit` (1024),
 `bobcrew.docker.network` (`bridge`), `bobcrew.docker.stop-timeout` (5s), `bobcrew.docker.max-env-vars`
-(32), `bobcrew.docker.max-env-value-length` (32768).
+(32), `bobcrew.docker.max-env-value-length` (32768); for repositories, `bobcrew.git.clone-timeout` (10m) and
+`bobcrew.git.allowed-schemes` (`https`).
 
 **Containers.** Each session's container is created with the labels `bobcrew.managed=true`,
 `bobcrew.instance=<instance id>`, `bobcrew.session` and `bobcrew.owner`. When the server starts, and when
@@ -283,6 +318,11 @@ Notes on Bob:
   can ask its agent for them, so a role should pass only what every user of the server may see.
 - **File downloads**: the path must stay inside `/opt/workspace`, and only regular files are served, so
   a symbolic link cannot lead elsewhere in the container.
+- **File uploads**: the path must stay inside `/opt/workspace`; the file is written by the session's
+  user (not by Docker as root), and a symbolic link or a directory at the target is refused.
+- **Repositories**: `https://` only (the allowed schemes are a setting), no credentials, query or fragment in
+  the URL, a plain branch name; both go to `git` as separate arguments after `--`, never through a shell.
+  Like the image and variables, the page can only ask for a repository through a role.
 - **The API key** stays in the server's configuration and the containers' environment. It is never part
   of a response or event.
 - **The UI app** has no login, so it listens on `127.0.0.1` only and holds the token itself; the
@@ -298,10 +338,11 @@ All under `/api`, with `Authorization: Bearer <token>`.
 |---|---|
 | `GET /me` | The token's user |
 | `GET /sessions` | All sessions |
-| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}}` | Creates a session and starts its agent in a new container; all fields optional (`image` defaults to the server's default image). 400 if the image is not on the server or a variable is refused |
-| `GET /sessions/{id}` | One session: `id`, `owner`, `title`, `image`, `containerId`, `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
+| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). 400 if the image is not on the server, a variable is refused, or the repository is refused or cannot be cloned |
+| `GET /sessions/{id}` | One session: `id`, `owner`, `title`, `image`, `containerId`, `repository` (`url`, `branch`, `directory`, or null), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
 | `DELETE /sessions/{id}` | Closes it and removes its container |
 | `GET /sessions/{id}/file?path=<path>` | Downloads a regular file from the session's workspace; `path` is relative to `/opt/workspace` or absolute inside it, `file://` allowed (403 if downloads are disabled) |
+| `PUT /sessions/{id}/files?path=<path>` (the file as the body) | Writes a file into the workspace, creating directories and replacing a file there; `path` as for downloads. Answers 201 `{"path", "size"}`; 400 for a path outside the workspace, a link or a directory, 413 if too large, 403 if uploads are disabled |
 | `GET /sessions/{id}/metrics` | A snapshot of the container: `state`, `startedAt`, `uptimeSeconds`, `cpuPercent` (100 = one core), `memoryUsageBytes`, `memoryLimitBytes`, `pids`, `networkRxBytes`, `networkTxBytes`, `blockReadBytes`, `blockWriteBytes`. Docker samples for a second or two |
 | `POST /sessions/{id}/prompt` `{"text": "..."}` | Starts a turn; progress arrives as events |
 | `POST /sessions/{id}/cancel` | Stops the running turn |
@@ -311,21 +352,22 @@ All under `/api`, with `Authorization: Bearer <token>`.
 | `GET /sessions/{id}/events?after=<seq>` | Server-Sent Events: the session's events after `seq`, then new ones |
 
 The UI app answers two more paths itself, without contacting a server: `GET /api/roles` (`[{"id", "name",
-"description", "image", "env"}]`, `env` being names only) and `GET /api/roles/{id}` (adds `prompt` and the raw
-`manifest`; 404 if there is no such role). It also rewrites `POST /api/sessions`: the page sends
-`{"title", "role"}`, and the server receives the role's `image` and `env` (header `X-BobCrew-Missing-Env`
-lists the variables that were not set).
+"description", "image", "env", "repository", "branch"}]`, `env` being names only) and `GET /api/roles/{id}` (adds
+`prompt` and the raw `manifest`; 404 if there is no such role). It also rewrites `POST /api/sessions`: the page
+sends `{"title", "role"}`, and the server receives the role's `image`, `env` and `repository` (header
+`X-BobCrew-Missing-Env` lists the variables that were not set). Uploads are streamed through it; other request
+bodies are limited to 1 MB.
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,
-`permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here; `data.workspaceWiped` says whether the files went too). The server keeps the last 5000 events of a
+`permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here; `data.workspaceWiped` says whether the files went too), `file_uploaded` (`user` uploaded `data.path`, `data.size` bytes), `repository_cloned` (`data.url`, `data.branch`, `data.path`). The server keeps the last 5000 events of a
 session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss nothing.
 
 ## Not in this version
 
 One process on one machine, by design. A later version can split it into workers (which own the
 agent containers), stateless coordinators and a small metadata store; `SessionManager` is the seam
-for that. Also not done yet: per-user API keys, cloning a git repository into a new workspace,
+for that. Also not done yet: per-user API keys, cloning over ssh, re-cloning after a wipe,
 restricting sessions to their owner, resuming a session after a restart, workspaces that outlive their
 session or are shared between sessions, pulling images, per-session network policies, metrics history.
 

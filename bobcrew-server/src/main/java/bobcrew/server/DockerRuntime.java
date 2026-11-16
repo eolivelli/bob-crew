@@ -277,42 +277,165 @@ class DockerRuntime implements Closeable {
         }
     }
 
+    /** How an exec ended: its exit code (-1 if it did not finish) and the tail of what it printed. */
+    record ExecResult(int exitCode, String output) {
+    }
+
     private int exec(String containerId, Duration timeout, String... command) {
+        return exec(containerId, timeout, null, List.of(), List.of(command)).exitCode();
+    }
+
+    /**
+     * Runs a command in the container as the session's user and waits for it.
+     * @param stdin written to the command's standard input, or null for none. docker-java never closes the
+     * command's input when this stream ends, so the command must know by itself how much to read
+     * @param env extra environment variables, {@code NAME=value}
+     */
+    private ExecResult exec(String containerId, Duration timeout, InputStream stdin, List<String> env,
+            List<String> command) {
+        OutputTail output = new OutputTail(4096);
         try {
             ExecCreateCmdResponse exec = client.execCreateCmd(containerId)
-                .withCmd(command)
+                .withCmd(command.toArray(String[]::new))
                 .withUser(settings.user())
+                .withWorkingDir(WORKSPACE)
+                .withEnv(env)
+                .withAttachStdin(stdin != null)
                 .withAttachStdout(true)
                 .withAttachStderr(true)
                 .exec();
-            ResultCallback.Adapter<Frame> output = new ResultCallback.Adapter<>() {
+            ResultCallback.Adapter<Frame> frames = new ResultCallback.Adapter<>() {
                 @Override
                 public void onNext(Frame frame) {
-                    log.debug("exec {}: {}", shortId(containerId), frame);
+                    output.add(frame.getPayload());
                 }
             };
-            if (!client.execStartCmd(exec.getId()).exec(output).awaitCompletion(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
-                return -1;
+            var start = client.execStartCmd(exec.getId());
+            if (stdin != null) {
+                start.withStdIn(stdin);
+            }
+            try (ResultCallback.Adapter<Frame> running = start.exec(frames)) {
+                if (!running.awaitCompletion(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
+                    return new ExecResult(-1, output.text());
+                }
             }
             // the output can end a moment before Docker records the exit code
             long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
             while (true) {
                 InspectExecResponse inspected = client.inspectExecCmd(exec.getId()).exec();
                 if (!Boolean.TRUE.equals(inspected.isRunning()) && inspected.getExitCodeLong() != null) {
-                    return inspected.getExitCodeLong().intValue();
+                    return new ExecResult(inspected.getExitCodeLong().intValue(), output.text());
                 }
                 if (System.nanoTime() > deadline) {
-                    return -1;
+                    return new ExecResult(-1, output.text());
                 }
                 Thread.sleep(50);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return -1;
-        } catch (RuntimeException e) {
+            return new ExecResult(-1, output.text());
+        } catch (IOException | RuntimeException e) {
             log.warn("Running a command in container {} failed: {}", shortId(containerId), e.toString());
-            return -1;
+            return new ExecResult(-1, output.text());
         }
+    }
+
+    /** Keeps the last bytes a command printed, for error messages. */
+    private static final class OutputTail {
+
+        private final int limit;
+
+        private final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+
+        OutputTail(int limit) {
+            this.limit = limit;
+        }
+
+        synchronized void add(byte[] payload) {
+            if (payload == null) {
+                return;
+            }
+            bytes.write(payload, 0, payload.length);
+            if (bytes.size() > limit * 2) {
+                byte[] all = bytes.toByteArray();
+                bytes.reset();
+                bytes.write(all, all.length - limit, limit);
+            }
+        }
+
+        synchronized String text() {
+            byte[] all = bytes.toByteArray();
+            int from = Math.max(0, all.length - limit);
+            return new String(all, from, all.length - from, java.nio.charset.StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * Writes a file into the container as the session's user, creating its directory if needed and replacing
+     * a file already there. Running as that user (rather than through Docker's archive API, which writes as
+     * root) means the upload can only go where the agent itself could write. {@code path} must already be
+     * checked by {@link ContainerPaths}; a symbolic link or a directory at that path is refused.
+     * @param size the exact number of bytes {@code content} holds: the command reads that many and stops,
+     * since docker-java does not close its input
+     * @throws ApiException 400 if the path is a link or a directory, 500 if writing fails
+     */
+    void writeFile(String containerId, String path, InputStream content, long size, Duration timeout) {
+        String script = """
+                [ -L "$1" ] && exit 3
+                [ -d "$1" ] && exit 4
+                mkdir -p -- "$(dirname -- "$1")" || exit 5
+                umask 022
+                head -c "$2" > "$1" || exit 6
+                [ "$(wc -c < "$1")" -eq "$2" ] || exit 7
+                """;
+        ExecResult result = exec(containerId, timeout, content, List.of(),
+                List.of("sh", "-c", script, "bobcrew-upload", path, Long.toString(size)));
+        switch (result.exitCode()) {
+            case 0 -> {
+            }
+            case 3 -> throw new ApiException(HttpStatus.BAD_REQUEST, "The target is a symbolic link");
+            case 4 -> throw new ApiException(HttpStatus.BAD_REQUEST, "The target is a directory");
+            default -> {
+                log.warn("Writing {} in container {} exited with {}: {}", path, shortId(containerId),
+                        result.exitCode(), result.output().strip());
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "The file could not be written"
+                        + (result.output().isBlank() ? "" : ": " + lastLine(result.output())));
+            }
+        }
+    }
+
+    /**
+     * Clones a repository into the workspace, shallow and with one branch, as the session's user. The command
+     * runs through the image's entrypoint, so the image's {@code profile.d} setup applies: with bob-base, a
+     * {@code GH_TOKEN} passed to the session gives access to private GitHub repositories.
+     * @throws ApiException 400 if git fails, with git's last line of output
+     */
+    void cloneRepository(String containerId, GitRepository repository, Duration timeout) {
+        List<String> command = new ArrayList<>();
+        String[] entrypoint = client.inspectContainerCmd(containerId).exec().getConfig().getEntrypoint();
+        if (entrypoint != null) {
+            command.addAll(List.of(entrypoint));
+        }
+        command.addAll(List.of("git", "clone", "--depth", "1", "--single-branch", "--no-tags"));
+        if (repository.branch() != null) {
+            command.addAll(List.of("--branch", repository.branch()));
+        }
+        command.addAll(List.of("--", repository.url(), repository.path()));
+        ExecResult result = exec(containerId, timeout, null, List.of("GIT_TERMINAL_PROMPT=0"), command);
+        if (result.exitCode() != 0) {
+            log.warn("Cloning {} in container {} exited with {}: {}", repository.url(), shortId(containerId),
+                    result.exitCode(), result.output().strip());
+            String reason = result.exitCode() == -1 && result.output().isBlank() ? "it did not finish in time"
+                    : lastLine(result.output());
+            throw new ApiException(HttpStatus.BAD_REQUEST, "The repository " + repository.url()
+                    + " could not be cloned: " + reason);
+        }
+    }
+
+    private static String lastLine(String output) {
+        String[] lines = output.strip().split("\\R");
+        String last = lines.length == 0 ? "" : lines[lines.length - 1].strip();
+        return last.length() > 300 ? last.substring(0, 300) + "…" : last;
     }
 
     /**

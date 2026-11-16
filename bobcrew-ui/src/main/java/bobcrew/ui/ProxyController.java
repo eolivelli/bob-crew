@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -31,9 +32,13 @@ import tools.jackson.databind.node.ObjectNode;
  * which is what keeps the Server-Sent Events of a session flowing.
  *
  * <p>Creating a session is the one request it rewrites: the browser names a {@code role}, and the request
- * forwarded carries that role's {@code image} and {@code env}, with the values of the environment variables
- * read here, from this app's environment. So the values never pass through the browser, and the page cannot
- * choose an image or set variables by itself: a request that tries is refused.
+ * forwarded carries that role's {@code image}, {@code env} (with the values of the environment variables
+ * read here, from this app's environment) and {@code repository}. So the values never pass through the browser,
+ * and the page cannot choose an image, set variables or have a repository cloned by itself: a request that tries
+ * is refused.
+ *
+ * <p>Request bodies are read whole (up to {@link #MAX_BODY}) before forwarding, except file uploads
+ * ({@code PUT .../sessions/{id}/files}), which are streamed: the server enforces their size limit.
  */
 @RestController
 class ProxyController {
@@ -44,6 +49,14 @@ class ProxyController {
     private static final int MAX_BODY = 1024 * 1024;
 
     private static final List<String> FORWARDED_REQUEST_HEADERS = List.of("Content-Type", "Accept", "Last-Event-ID");
+
+    /** A file upload, which is streamed rather than read into memory. */
+    private static final Pattern UPLOAD_PATH = Pattern.compile("/api/sessions/[^/]+/files");
+
+    /** Creating a session waits for the server to clone the role's repository, which can take minutes. */
+    private static final Duration CREATE_TIMEOUT = Duration.ofMinutes(15);
+
+    private static final Duration UPLOAD_TIMEOUT = Duration.ofMinutes(30);
 
     /** Besides Content-Type: the file name of a download, and what keeps the browser from sniffing it. */
     private static final List<String> FORWARDED_RESPONSE_HEADERS = List.of("Cache-Control", "Content-Disposition",
@@ -116,26 +129,37 @@ class ProxyController {
         String query = request.getQueryString();
         URI target = URI.create(server.baseUri() + forwardedPath + (query == null ? "" : "?" + query));
 
-        byte[] body = request.getInputStream().readNBytes(MAX_BODY + 1);
-        if (body.length > MAX_BODY) {
-            sendError(response, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, "The request is too large");
-            return;
-        }
+        boolean upload = request.getMethod().equals("PUT") && UPLOAD_PATH.matcher(forwardedPath).matches();
+        boolean create = request.getMethod().equals("POST") && forwardedPath.equals("/api/sessions");
         List<String> missingEnv = new ArrayList<>();
-        if (request.getMethod().equals("POST") && forwardedPath.equals("/api/sessions")) {
-            Optional<byte[]> expanded = expandRole(body, missingEnv, response);
-            if (expanded.isEmpty()) {
+        HttpRequest.BodyPublisher publisher;
+        if (upload) {
+            InputStream in = request.getInputStream();
+            long length = request.getContentLengthLong();
+            HttpRequest.BodyPublisher streamed = HttpRequest.BodyPublishers.ofInputStream(() -> in);
+            publisher = length >= 0 ? HttpRequest.BodyPublishers.fromPublisher(streamed, length) : streamed;
+        } else {
+            byte[] body = request.getInputStream().readNBytes(MAX_BODY + 1);
+            if (body.length > MAX_BODY) {
+                sendError(response, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, "The request is too large");
                 return;
             }
-            body = expanded.get();
+            if (create) {
+                Optional<byte[]> expanded = expandRole(body, missingEnv, response);
+                if (expanded.isEmpty()) {
+                    return;
+                }
+                body = expanded.get();
+            }
+            publisher = body.length == 0 ? HttpRequest.BodyPublishers.noBody()
+                    : HttpRequest.BodyPublishers.ofByteArray(body);
         }
         boolean stream = path.endsWith("/events");
         HttpRequest.Builder forwarded = HttpRequest.newBuilder(target)
-            .method(request.getMethod(), body.length == 0 ? HttpRequest.BodyPublishers.noBody()
-                    : HttpRequest.BodyPublishers.ofByteArray(body))
+            .method(request.getMethod(), publisher)
             .header("Authorization", "Bearer " + server.token());
         if (!stream) {
-            forwarded.timeout(Duration.ofSeconds(120));
+            forwarded.timeout(upload ? UPLOAD_TIMEOUT : create ? CREATE_TIMEOUT : Duration.ofSeconds(120));
         }
         for (String name : FORWARDED_REQUEST_HEADERS) {
             String value = request.getHeader(name);
@@ -191,7 +215,7 @@ class ProxyController {
 
     /**
      * Turns the browser's {@code {"title": ..., "role": ...}} into what the server takes:
-     * {@code {"title": ..., "image": ..., "env": {...}}}. Variables the role lists but that are not set here are
+     * {@code {"title": ..., "image": ..., "env": {...}, "repository": {"url": ..., "branch": ...}}}. Variables the role lists but that are not set here are
      * left out and added to {@code missingEnv} (names only).
      * @return the body to forward, or empty if an error was sent instead
      */
@@ -209,9 +233,9 @@ class ProxyController {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST, "The request is not valid JSON");
             return Optional.empty();
         }
-        if (request.has("image") || request.has("env")) {
+        if (request.has("image") || request.has("env") || request.has("repository")) {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-                    "The image and environment of a session come from its role");
+                    "The image, environment and repository of a session come from its role");
             return Optional.empty();
         }
         JsonNode roleId = request.remove("role");
@@ -236,8 +260,16 @@ class ProxyController {
             if (!env.isEmpty()) {
                 request.set("env", env);
             }
-            log.info("Creating a session with role {} (image {}, environment {}, not set here: {})", role.get().id(),
-                    role.get().image() == null ? "default" : role.get().image(), env.propertyNames(), missingEnv);
+            if (role.get().repository() != null) {
+                ObjectNode repository = request.putObject("repository");
+                repository.put("url", role.get().repository());
+                if (role.get().branch() != null) {
+                    repository.put("branch", role.get().branch());
+                }
+            }
+            log.info("Creating a session with role {} (image {}, environment {}, not set here: {}, repository {})",
+                    role.get().id(), role.get().image() == null ? "default" : role.get().image(), env.propertyNames(),
+                    missingEnv, role.get().repository() == null ? "none" : role.get().repository());
         }
         return Optional.of(json.writeValueAsBytes(request));
     }

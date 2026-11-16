@@ -78,6 +78,21 @@ h1 { font-size: 20px; margin: 0 0 4px; }
 
 // Replays the session's events into display items, the way the live page builds its cards: chunks
 // of one kind join into one message, a tool call or plan is one card that later updates change.
+// The one-line description of a file_uploaded or repository_cloned event; the page uses it too.
+function workspaceEventText(event) {
+  const data = event.data || {};
+  if (event.type === 'file_uploaded') {
+    const size = Number(data.size) || 0;
+    const shown = size < 1024 ? `${size} B` : size < 1048576 ? `${(size / 1024).toFixed(1)} KiB`
+      : `${(size / 1048576).toFixed(1)} MiB`;
+    return `${event.user || 'someone'} uploaded ${data.path || '?'} (${shown})`;
+  }
+  if (event.type === 'repository_cloned') {
+    return `cloned ${data.url || '?'}${data.branch ? ' (branch ' + data.branch + ')' : ''} into ${data.path || '?'}`;
+  }
+  return '';
+}
+
 function transcriptItems(events) {
   const items = [];
   const toolCalls = new Map();
@@ -171,6 +186,10 @@ function transcriptItems(events) {
         streaming = null;
         items.push({ type: 'error', text: data.message || 'Error' });
         break;
+      case 'file_uploaded':
+      case 'repository_cloned':
+        items.push({ type: 'divider', text: workspaceEventText(event) });
+        break;
       default: break;
     }
   }
@@ -217,6 +236,8 @@ function buildTranscriptHtml(session, events, context) {
   const meta = [
     session.agent || 'agent',
     'image ' + session.image,
+    ...(session.repository ? ['repository ' + session.repository.url
+      + (session.repository.branch ? ' (' + session.repository.branch + ')' : '')] : []),
     'owner ' + session.owner,
     'session ' + session.id,
   ].join(' · ');

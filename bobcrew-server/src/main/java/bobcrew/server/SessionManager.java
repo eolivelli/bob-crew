@@ -57,14 +57,16 @@ public class SessionManager {
      * @param image the image to run; null or blank for the server's default image
      * @param env environment variables for the container; nothing else from the client or the server's own
      * environment gets in (the server adds the API key)
-     * @throws ApiException 400 for a bad image or environment, 429 when the server is full, 502 if the agent fails
+     * @param repository cloned into the workspace before the agent's session starts, or null
+     * @throws ApiException 400 for a bad image, environment or repository, 429 when the server is full, 502 if the
+     * agent fails
      */
-    AgentSession create(String owner, String title, String image, Map<String, String> env) {
+    AgentSession create(String owner, String title, String image, Map<String, String> env, GitRepository repository) {
         String chosenImage = image == null || image.isBlank() ? docker.defaultImage() : image.strip();
         Map<String, String> checkedEnv = checkEnv(env);
         String id = UUID.randomUUID().toString();
         AgentSession session = new AgentSession(new DockerRuntime.ContainerSpec(id, owner, chosenImage, checkedEnv),
-                title == null || title.isBlank() ? chosenImage : title.strip(), docker, properties);
+                repository, title == null || title.isBlank() ? chosenImage : title.strip(), docker, properties);
         synchronized (this) {
             if (stopping) {
                 throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "The server is shutting down");
@@ -82,8 +84,8 @@ public class SessionManager {
             sessions.remove(session.id());
             throw e;
         }
-        log.info("Session {} created by {} with image {} and environment {}", session.id(), owner, chosenImage,
-                checkedEnv.keySet());
+        log.info("Session {} created by {} with image {}, environment {}{}", session.id(), owner, chosenImage,
+                checkedEnv.keySet(), repository == null ? "" : ", repository " + repository.url());
         return session;
     }
 

@@ -17,8 +17,11 @@ public record BobCrewProperties(
         @DefaultValue("12h") Duration idleTimeout,
         @DefaultValue("5000") int eventBufferSize,
         @DefaultValue("false") boolean fileDownloadsEnabled,
+        @DefaultValue("true") boolean fileUploadsEnabled,
+        @DefaultValue("100MB") DataSize maxUploadSize,
         @DefaultValue Agent agent,
         @DefaultValue Docker docker,
+        @DefaultValue Git git,
         @DefaultValue Auth auth) {
 
     /** What runs inside a session's container. */
@@ -49,6 +52,12 @@ public record BobCrewProperties(
             @DefaultValue("5s") Duration stopTimeout,
             @DefaultValue("32") int maxEnvVars,
             @DefaultValue("32768") int maxEnvValueLength) {
+    }
+
+    /** Cloning a repository into a new session's workspace. */
+    public record Git(
+            @DefaultValue("10m") Duration cloneTimeout,
+            @DefaultValue("https") List<String> allowedSchemes) {
     }
 
     /** How API tokens are checked. */

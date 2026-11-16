@@ -35,8 +35,11 @@ Tests never need Bob or an API key: the server tests run `bobcrew-fake-agent` in
 an image they build once per run (`bobcrew-fake-agent:test`, from
 `bobcrew-server/src/test/docker/fake-agent/Dockerfile` plus `docker/bob-base/bobcrew-entrypoint.sh`).
 They need a Docker daemon and are skipped, not failed, without one (`TestDocker`, a JUnit condition, decides
-before Spring starts). The only network use is pulling the test image's base the first time. Do not add a
-test that requires the real `bob` binary, the `bobcrew/bob-*` images, or other network access.
+before Spring starts). The only network use is building that image the first time (its base, and
+`microdnf install git-core`). The image holds a bare repository, `/opt/test-repos/sample.git` (branches
+`main` and `feature`), which the tests clone over `file://` (allowed only in tests, through
+`bobcrew.git.allowed-schemes`). Do not add a test that requires the real `bob` binary, the `bobcrew/bob-*`
+images, or other network access.
 
 After changing `bobcrew-fake-agent`, run `mvn install -pl bobcrew-fake-agent` (or build with
 `-am`) before running server tests: they copy its `-all` jar from the local repository into the image.
@@ -64,8 +67,9 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 |---|---|
 | `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager`. |
 | `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limit, idle cleanup, shutdown, and the checks on client-supplied environment variables. |
-| `AgentSession` | One agent container and its ACP session: start, prompt, cancel, mode, permissions, clear, metrics, file reads, close, crash detection. |
-| `DockerRuntime` | The only class that talks to Docker: creates containers (hardened, labelled, never pulling), attaches, execs (workspace wipe), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
+| `AgentSession` | One agent container and its ACP session: start (with the repository clone), prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
+| `DockerRuntime` | The only class that talks to Docker: creates containers (hardened, labelled, never pulling), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
+| `GitRepository` | A repository to clone into a new session: checks the URL (allowed schemes, no credentials) and branch, and names the clone's directory. |
 | `ContainerAcpTransport` | The SDK's `AcpClientTransport` over a container's attach streams. The one class of ours with Reactor types, because the SDK interface has them. |
 | `ContainerMetrics` | The metrics record (`GET /sessions/{id}/metrics`). |
 | `EventLog` | A session's numbered events with replay; one queue per subscriber. |
@@ -80,10 +84,10 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 
 | Class | Role |
 |---|---|
-| `ProxyController` | Forwards `/api/**` to the server with the token; streams responses through. Rewrites session creation: `role` in, the role's `image` and `env` (values read here) out; refuses `image`/`env` sent by the browser. |
+| `ProxyController` | Forwards `/api/**` to the server with the token; streams responses through, and upload request bodies too (other bodies are read whole, up to 1 MB). Rewrites session creation: `role` in, the role's `image`, `env` (values read here) and `repository` out; refuses `image`/`env`/`repository` sent by the browser. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
 | `ServerConnection` | Server URL, token, and the HTTP client with the trusted CA. |
-| `RoleRegistry`, `RolesController` | Roles (first prompt, `image`, `env` names): Markdown manifests in `~/.bobcrew/roles`, read on every request; `GET /api/roles[/{id}]` answered locally, read-only. UI only, the server knows nothing of roles. Ids must match a strict name pattern and are never joined into a path otherwise; symlinks are ignored. |
+| `RoleRegistry`, `RolesController` | Roles (first prompt, `image`, `env` names, `repository` and `branch`): Markdown manifests in `~/.bobcrew/roles`, read on every request; `GET /api/roles[/{id}]` answered locally, read-only. UI only, the server knows nothing of roles. Ids must match a strict name pattern and are never joined into a path otherwise; symlinks are ignored. |
 | `HostEnvironment` | Where a role's environment variable values come from (the UI process's environment); a bean so tests can replace it. |
 | `static/app.js` | The front end: plain JavaScript, no build step, no dependencies. |
 | `static/links.js` | Makes `https://` links in agent and user text clickable (https only, built as DOM elements, never HTML). Tested with `node bobcrew-ui/src/test/js/links.test.js` (Maven runs it too). |
@@ -131,6 +135,9 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
   own use; our code stays on Jackson 3. Docker 29 refuses API versions below 1.44, so the version is set
   explicitly (`bobcrew.docker.api-version`). Exec exit codes can appear a moment after the exec's output
   ends; `DockerRuntime.exec` polls for them.
+- **Exec input never ends**: docker-java's httpclient5 transport does not half-close the connection when
+  an exec's stdin stream ends, so a command reading to end of input waits forever. `DockerRuntime.writeFile`
+  therefore spools the upload to a temporary file first, to know its size, and runs `head -c <size>`.
 - **Leftover containers**: every container carries `bobcrew.managed` and `bobcrew.instance` labels;
   `DockerRuntime.removeOrphans` removes those of this instance at startup and in `closeAll`. Tests use a
   random instance id so that they never touch a real server's containers on the same machine.
@@ -157,10 +164,15 @@ the maintainer.
 - The JWT secret and tokens are never logged. The UI's token must never be sent to the browser.
 - Every path from a client goes through `ContainerPaths.resolve`. Do not build paths from request
   data anywhere else. File downloads serve regular files only, never what a symbolic link points to.
+  Uploads are written by an exec running as the session's user, never through Docker's archive API
+  (which writes as root and follows links anywhere in the container).
+- Repository URLs and branches go through `GitRepository.of`, and reach `git` as separate arguments after
+  `--`, never through a shell. URLs with credentials are refused: the URL shows in logs, events and the
+  session's details.
 - Containers get no host mounts (binds or volumes), no host environment, no capabilities,
   `no-new-privileges`, and a non-root user enforced by the server. Images are never pulled. Keep it so.
 - Session creation from the browser goes through the UI's role expansion: the page never sees
-  environment variable values and cannot pick an image or variables itself.
+  environment variable values and cannot pick an image, variables or a repository itself.
 - The server has no cookies and no CORS headers. Adding either creates a CSRF surface that does
   not exist today.
 - The UI app binds to `127.0.0.1` and has no login; `LocalOnlyFilter` (Host, Origin,

@@ -35,6 +35,10 @@ bobcrew:
   event-buffer-size: 5000
   # Whether clients may download files from a session's workspace
   file-downloads-enabled: ${BOBCREW_FILE_DOWNLOADS_ENABLED:false}
+  # Whether clients may upload files into a session's workspace, and how large one may be. Uploads are
+  # written by the session's (non-root) user, so they can only go where the agent itself can write.
+  file-uploads-enabled: ${BOBCREW_FILE_UPLOADS_ENABLED:true}
+  max-upload-size: ${BOBCREW_MAX_UPLOAD_SIZE:100MB}
   agent:
     # The command run in each session's container (the image's entrypoint runs it). It must speak
     # ACP on stdin/stdout. --auto-approve is deliberately absent: users answer permission requests.
@@ -65,6 +69,11 @@ bobcrew:
     # Limits on the environment variables a client may pass to a session
     max-env-vars: 32
     max-env-value-length: 32768
+  git:
+    # How long cloning a session's repository (shallow, one branch) may take; session creation waits for it
+    clone-timeout: 10m
+    # URL schemes a repository may use. URLs with credentials in them are always refused.
+    allowed-schemes: https
   auth:
     jwt-secret-file: ${BOBCREW_JWT_SECRET_FILE:}
     revoked-jti-file: ${BOBCREW_REVOKED_JTI_FILE:}

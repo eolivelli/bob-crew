@@ -89,6 +89,26 @@ class FileDownloadIntegrationTest {
     }
 
     @Test
+    void anUploadedBinaryFileDownloadsUnchanged() throws Exception {
+        String id = createSession();
+        byte[] content = new byte[300_000];
+        new java.util.Random(42).nextBytes(content);
+        HttpResponse<String> uploaded = http.send(HttpRequest.newBuilder(
+                URI.create("https://localhost:" + port + "/api/sessions/" + id + "/files?path=data/random.bin"))
+            .header("Authorization", "Bearer " + alice)
+            .PUT(HttpRequest.BodyPublishers.ofByteArray(content))
+            .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(uploaded.statusCode()).as(uploaded.body()).isEqualTo(201);
+
+        HttpResponse<byte[]> downloaded = http.send(HttpRequest.newBuilder(
+                URI.create("https://localhost:" + port + "/api/sessions/" + id + "/file?path=data/random.bin"))
+            .header("Authorization", "Bearer " + alice)
+            .build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(downloaded.statusCode()).isEqualTo(200);
+        assertThat(downloaded.body()).isEqualTo(content);
+    }
+
+    @Test
     void returnsNotFoundForAMissingFile() throws Exception {
         String id = createSession();
         HttpResponse<String> response = send("GET", "/sessions/" + id + "/file?path=nothing-here.txt", null, alice);
