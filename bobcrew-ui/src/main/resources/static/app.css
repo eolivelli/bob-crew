@@ -73,6 +73,8 @@ button.danger { color: var(--bad); }
 
 #new-session { display: grid; gap: 6px; padding: 10px 16px 14px; border-bottom: 1px solid var(--border); }
 
+#show-roles { margin: 8px 16px; }
+
 #sessions { list-style: none; margin: 0; padding: 6px; overflow-y: auto; flex: 1; }
 #sessions li { padding: 8px 10px; border-radius: 6px; cursor: pointer; }
 #sessions li:hover { background: var(--bg); }
@@ -109,6 +111,24 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height:
 .badge.failed, .badge.closed { color: var(--bad); border-color: var(--bad); }
 
 #notice { padding: 8px 20px; background: var(--bad); color: #fff; font-size: 14px; cursor: pointer; }
+
+#roles-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#roles-view[hidden] { display: none; }
+#roles-view header { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--panel); }
+#roles-view h2 { font-size: 16px; margin: 0; }
+#roles-hint { color: var(--muted); font-size: 13px; margin: 10px 20px 0; }
+#roles-body { flex: 1; min-height: 0; display: flex; gap: 16px; padding: 12px 20px 20px; }
+#roles-list { list-style: none; margin: 0; padding: 0; width: 240px; flex: none; overflow-y: auto; }
+#roles-list li { padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+#roles-list li:hover { background: var(--panel); }
+#roles-list li.selected { background: var(--user); }
+#roles-list .name { display: block; font-weight: 600; overflow-wrap: anywhere; }
+#roles-list .sub { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+#role-detail { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#role-detail h3 { margin: 0 0 4px; font-size: 15px; }
+#role-description { color: var(--muted); margin: 0 0 8px; }
+#role-manifest { flex: 1; margin: 0; padding: 10px; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+main.showing-roles > :not(#roles-view):not(#notice) { display: none; }
 
 #transcript { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
 #empty { color: var(--muted); margin: auto; }

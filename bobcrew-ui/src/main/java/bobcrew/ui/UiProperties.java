@@ -12,14 +12,15 @@ public record UiProperties(
         String serverUrl,
         String token,
         String tokenFile,
-        String caFile) {
+        String caFile,
+        String rolesDir) {
 
     @ConstructorBinding
     public UiProperties {
     }
 
     public UiProperties(String serverUrl, String token, String tokenFile, String caFile) {
-        this(null, serverUrl, token, tokenFile, caFile);
+        this(null, serverUrl, token, tokenFile, caFile, null);
     }
 
     public record ServerConfig(

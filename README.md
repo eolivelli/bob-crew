@@ -91,6 +91,31 @@ then start the UI and open <http://127.0.0.1:8642>:
 java -jar bobcrew-ui/target/bobcrew-ui-0.1.0-SNAPSHOT.jar
 ```
 
+## Roles
+
+A role is a named default prompt ("QA Tester", "Code reviewer", ...). Roles exist only in the UI app:
+the server never sees them. Each role is a Markdown manifest in `~/.bobcrew/roles/` (or the directory
+in `bobcrew.ui.roles-dir`), next to `ui.properties`. The file name without `.md` is the role's id
+(letters, digits, `.`, `_`, `-`; up to 100 characters).
+
+```
+---
+name: QA Tester
+description: Exercises the application and reports defects
+---
+You are a QA tester. Run the application, try to break it, and report each defect with the
+steps to reproduce it.
+```
+
+The front matter is optional and understands only `name` (default: the id) and `description`; the rest of
+the file is the prompt. Files that are not `.md`, are symbolic links, are larger than 64 KiB, have an
+empty prompt, or come after the first 200 are ignored (a warning is logged). The directory is read on every
+request, so changes show up without restarting the UI.
+
+When creating a session, the **Role** list next to the title (shown when there are roles) can pick
+one: once the session exists, the UI sends the role's prompt to it as the first prompt, and a blank title becomes
+the role's name. The **Roles** button in the sidebar lists the roles and shows each manifest; it is read-only.
+
 ## Exporting a session
 
 The **Export transcript** button in a session's header downloads the whole session as one
@@ -168,6 +193,9 @@ All under `/api`, with `Authorization: Bearer <token>`.
 | `POST /sessions/{id}/mode` `{"modeId": "..."}` | Switches the agent's mode |
 | `POST /sessions/{id}/permissions/{toolCallId}` `{"optionId": "..."}` | Answers a permission request |
 | `GET /sessions/{id}/events?after=<seq>` | Server-Sent Events: the session's events after `seq`, then new ones |
+
+The UI app answers two more paths itself, without contacting a server: `GET /api/roles` (`[{"id", "name",
+"description"}]`) and `GET /api/roles/{id}` (adds `prompt` and the raw `manifest`; 404 if there is no such role).
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,

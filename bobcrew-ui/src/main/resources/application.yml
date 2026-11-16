@@ -19,3 +19,5 @@ bobcrew:
     token: ${BOBCREW_TOKEN:}
     token-file: ${BOBCREW_TOKEN_FILE:}
     ca-file: ${BOBCREW_CA_FILE:}
+    # Role manifests (*.md), one per role; read on every request
+    roles-dir: ${user.home}/.bobcrew/roles

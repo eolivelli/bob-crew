@@ -20,8 +20,10 @@
     <input id="new-workspace" list="workspaces" placeholder="Workspace directory" required autocomplete="off">
     <datalist id="workspaces"></datalist>
     <input id="new-title" placeholder="Title (optional)" maxlength="200" autocomplete="off">
+    <select id="new-role" title="Role: the prompt sent first to the new session" hidden></select>
     <button type="submit">New session</button>
   </form>
+  <button id="show-roles" type="button" title="List the available roles and read their manifests">Roles</button>
   <ul id="sessions"></ul>
 </aside>
 
@@ -41,6 +43,21 @@
     </div>
   </header>
   <div id="notice" hidden></div>
+  <section id="roles-view" hidden>
+    <header>
+      <h2>Roles</h2>
+      <button id="hide-roles" type="button">Back</button>
+    </header>
+    <p id="roles-hint">Read-only. Roles are manifests (<code>*.md</code>) in the roles directory of this computer, by default <code>~/.bobcrew/roles</code>.</p>
+    <div id="roles-body">
+      <ul id="roles-list"></ul>
+      <div id="role-detail">
+        <h3 id="role-name"></h3>
+        <p id="role-description"></p>
+        <pre id="role-manifest"></pre>
+      </div>
+    </div>
+  </section>
   <section id="transcript">
     <p id="empty">Select a session or create a new one.</p>
   </section>

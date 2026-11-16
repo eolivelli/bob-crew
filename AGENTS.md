@@ -70,6 +70,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent
 | `ProxyController` | Forwards `/api/**` to the server with the token; streams responses through. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
 | `ServerConnection` | Server URL, token, and the HTTP client with the trusted CA. |
+| `RoleRegistry`, `RolesController` | Roles (default prompts): Markdown manifests in `~/.bobcrew/roles`, read on every request; `GET /api/roles[/{id}]` answered locally, read-only. UI only, the server knows nothing of roles. Ids must match a strict name pattern and are never joined into a path otherwise; symlinks are ignored. |
 | `static/app.js` | The front end: plain JavaScript, no build step, no dependencies. |
 | `static/links.js` | Makes `https://` links in agent and user text clickable (https only, built as DOM elements, never HTML). Tested with `node bobcrew-ui/src/test/js/links.test.js` (Maven runs it too). |
 | `static/transcript-export.js` | Content-to-text helpers and the transcript export (events to a gzipped HTML page). Builds HTML as a string, so all text goes through `esc()`. Tested with `node bobcrew-ui/src/test/js/transcript-export.test.js` (Maven runs it too). |

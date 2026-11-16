@@ -8,6 +8,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   user: '',             // who this UI is signed in as
   servers: [],          // list of configured servers [{name, url}]
+  roles: [],            // available roles [{id, name, description}]
   sessions: [],
   current: null,        // id of the selected session
   source: null,         // its EventSource
@@ -82,6 +83,26 @@ async function refreshServers() {
     select.value = state.servers[0].name;
   }
   select.hidden = state.servers.length <= 1;
+}
+
+async function refreshRoles() {
+  try {
+    state.roles = (await api('GET', '/roles')) || [];
+  } catch (e) {
+    state.roles = [];
+  }
+  const dropdown = $('new-role');
+  const prev = dropdown.value;
+  const none = el('option', '', 'No role');
+  none.value = '';
+  dropdown.replaceChildren(none, ...state.roles.map((role) => {
+    const option = el('option', '', role.name);
+    option.value = role.id;
+    option.title = role.description;
+    return option;
+  }));
+  if (state.roles.some((role) => role.id === prev)) dropdown.value = prev;
+  dropdown.hidden = !state.roles.length;
 }
 
 async function refreshSessions() {
@@ -174,6 +195,7 @@ function setStatus(status) {
 // ---- one session --------------------------------------------------------
 
 function select(id, serverName) {
+  hideRoles();
   if (state.source) state.source.close();
   state.current = id;
   const session = state.sessions.find((s) => s.id === id && (!serverName || s.server === serverName))
@@ -398,12 +420,23 @@ $('new-session').addEventListener('submit', async (submit) => {
   button.disabled = true;
   const server = $('new-server').value;
   try {
+    const roleId = $('new-role').value;
+    // fetched first, so that a vanished role stops us before a session is created
+    const role = roleId ? await api('GET', `/roles/${encodeURIComponent(roleId)}`) : null;
     const createPath = server ? `/servers/${encodeURIComponent(server)}/sessions` : '/sessions';
     const session = await api('POST', createPath,
-      { workspace: $('new-workspace').value.trim(), title: $('new-title').value.trim() });
+      { workspace: $('new-workspace').value.trim(), title: $('new-title').value.trim() || (role ? role.name : '') });
     if (server) session.server = server;
     $('new-title').value = '';
     state.sessions.unshift(session);
+    if (role) {
+      // the role's prompt is the session's first prompt; a failure leaves the session usable
+      try {
+        await api('POST', `${createPath}/${encodeURIComponent(session.id)}/prompt`, { text: role.prompt });
+      } catch (e) {
+        notify(`The session was created, but the role prompt was not sent: ${e.message}`);
+      }
+    }
     select(session.id, server);
     refreshWorkspaces();
   } catch (e) {
@@ -491,6 +524,53 @@ $('close').addEventListener('click', async () => {
 
 $('new-server').addEventListener('change', () => refreshWorkspaces());
 
+// manifests can be added while the page is open; look again when the user starts a new session
+$('new-workspace').addEventListener('focus', () => refreshRoles());
+
+// ---- roles view (read-only) ----------------------------------------------
+
+function hideRoles() {
+  document.querySelector('main').classList.remove('showing-roles');
+  $('roles-view').hidden = true;
+}
+
+async function showRoles() {
+  document.querySelector('main').classList.add('showing-roles');
+  $('roles-view').hidden = false;
+  $('role-name').textContent = '';
+  $('role-description').textContent = '';
+  $('role-manifest').textContent = '';
+  await refreshRoles();
+  const list = $('roles-list');
+  if (!state.roles.length) {
+    list.replaceChildren(el('li', '', 'No roles found.'));
+    return;
+  }
+  list.replaceChildren(...state.roles.map((role) => {
+    const item = el('li');
+    item.append(el('span', 'name', role.name), el('span', 'sub', role.description || role.id));
+    item.addEventListener('click', () => showRole(role.id, item));
+    return item;
+  }));
+  showRole(state.roles[0].id, list.firstElementChild);
+}
+
+async function showRole(id, item) {
+  for (const other of $('roles-list').children) other.classList.remove('selected');
+  item.classList.add('selected');
+  try {
+    const role = await api('GET', `/roles/${encodeURIComponent(id)}`);
+    $('role-name').textContent = `${role.name} (${role.id})`;
+    $('role-description').textContent = role.description;
+    $('role-manifest').textContent = role.manifest;
+  } catch (e) {
+    notify(e.message);
+  }
+}
+
+$('show-roles').addEventListener('click', () => showRoles());
+$('hide-roles').addEventListener('click', () => hideRoles());
+
 (async function start() {
   await refreshServers();
   try {
@@ -501,6 +581,7 @@ $('new-server').addEventListener('change', () => refreshWorkspaces());
     notify(e.message);
   }
   refreshWorkspaces();
+  refreshRoles();
   await refreshSessions();
   const linked = location.hash.slice(1);
   if (linked) {

@@ -46,9 +46,14 @@ class UiProxyTest {
 
     private static final Path caFile;
 
+    private static final Path rolesDir;
+
     static {
         try {
             Path directory = Files.createTempDirectory("bobcrew-ui-test");
+            rolesDir = Files.createDirectory(directory.resolve("roles"));
+            Files.writeString(rolesDir.resolve("qa-tester.md"),
+                    "---\nname: QA Tester\ndescription: Finds defects\n---\nTest the app.\n");
             Path keyStoreFile = directory.resolve("upstream.p12");
             Process keytool = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "keytool").toString(),
                     "-genkeypair", "-alias", "server", "-keyalg", "RSA", "-keysize", "2048", "-validity", "2",
@@ -132,6 +137,7 @@ class UiProxyTest {
         registry.add("bobcrew.ui.server-url", () -> "https://localhost:" + upstream.getAddress().getPort() + "/");
         registry.add("bobcrew.ui.token", () -> TOKEN);
         registry.add("bobcrew.ui.ca-file", caFile::toString);
+        registry.add("bobcrew.ui.roles-dir", rolesDir::toString);
     }
 
     @LocalServerPort
@@ -166,6 +172,39 @@ class UiProxyTest {
         HttpResponse<String> script = get("/transcript-export.js");
         assertThat(script.statusCode()).isEqualTo(200);
         assertThat(script.body()).contains("function buildTranscriptHtml").doesNotContain(TOKEN);
+    }
+
+    @Test
+    void servesThePageWithTheRoleControls() throws Exception {
+        // the behaviour is in app.js and is checked by hand; here only that the page offers it
+        assertThat(get("/").body()).contains("id=\"new-role\"").contains("id=\"show-roles\"").contains("id=\"roles-view\"");
+        assertThat(get("/app.js").body()).contains("function showRoles").doesNotContain("innerHTML");
+    }
+
+    @Test
+    void servesRolesLocallyWithoutForwardingThem() throws Exception {
+        HttpResponse<String> listed = get("/api/roles");
+        assertThat(listed.statusCode()).isEqualTo(200);
+        assertThat(listed.body()).contains("\"id\":\"qa-tester\"").contains("\"name\":\"QA Tester\"")
+            .contains("\"description\":\"Finds defects\"").doesNotContain("Test the app.").doesNotContain("\"method\"");
+
+        HttpResponse<String> detail = get("/api/roles/qa-tester");
+        assertThat(detail.statusCode()).isEqualTo(200);
+        assertThat(detail.body()).contains("\"prompt\":\"Test the app.\"").contains("\"manifest\":\"---\\nname: QA Tester")
+            .doesNotContain("\"method\"");
+
+        HttpResponse<String> unknown = get("/api/roles/nope");
+        assertThat(unknown.statusCode()).isEqualTo(404);
+        assertThat(unknown.body()).contains("No such role").doesNotContain("\"method\"");
+        assertThat(get("/api/roles/a.b").statusCode()).isEqualTo(404);
+        assertThat(get("/api/roles/%2e%2e").statusCode()).isIn(400, 404);
+    }
+
+    @Test
+    void rolesAreOnlyServedToTheLocalBrowser() throws Exception {
+        HttpResponse<String> foreign = browser.send(HttpRequest.newBuilder(uri("/api/roles"))
+            .header("Origin", "https://evil.example").build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(foreign.statusCode()).isEqualTo(403);
     }
 
     @Test
