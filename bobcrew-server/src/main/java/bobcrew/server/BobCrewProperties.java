@@ -11,6 +11,7 @@ import org.springframework.util.unit.DataSize;
 @ConfigurationProperties("bobcrew")
 public record BobCrewProperties(
         @DefaultValue("8") int maxSessions,
+        @DefaultValue("4") int maxSessionsPerUser,
         @DefaultValue("30s") Duration requestTimeout,
         @DefaultValue("10m") Duration promptTimeout,
         @DefaultValue("2m") Duration permissionTimeout,
@@ -46,15 +47,16 @@ public record BobCrewProperties(
             @DefaultValue("default") String instanceId,
             @DefaultValue("bobcrew/bob-base:latest") String defaultImage,
             @DefaultValue("1000:1000") String user,
-            DataSize memoryLimit,
+            @DefaultValue("8GB") DataSize memoryLimit,
             @DefaultValue("0") double cpus,
-            @DefaultValue("0") long pidsLimit,
+            @DefaultValue("4096") long pidsLimit,
             DataSize maxMemory,
             @DefaultValue("0") double maxCpus,
-            @DefaultValue("bridge") String network,
+            @DefaultValue(DockerRuntime.DEFAULT_NETWORK) String network,
             @DefaultValue("5s") Duration stopTimeout,
             @DefaultValue("32") int maxEnvVars,
-            @DefaultValue("32768") int maxEnvValueLength) {
+            @DefaultValue("32768") int maxEnvValueLength,
+            @DefaultValue("bobcrew/*") List<String> allowedImages) {
     }
 
     /** Cloning a repository into a new session's workspace. */

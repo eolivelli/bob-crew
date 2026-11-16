@@ -85,6 +85,9 @@ class ServerIntegrationTest {
         registry.add("bobcrew.auth.jwt-secret-file", () -> directory.resolve("jwt.secret").toString());
         registry.add("bobcrew.auth.revoked-jti-file", revokedFile::toString);
         registry.add("bobcrew.max-sessions", () -> "3");
+        registry.add("bobcrew.max-sessions-per-user", () -> "2");
+        // allowed, so that its absence is what gets it refused
+        registry.add("bobcrew.docker.allowed-images", () -> "bobcrew/*,bobcrew-no-such-image:*");
         registry.add("bobcrew.permission-timeout", () -> "2s");
         registry.add("bobcrew.agent.api-key", () -> API_KEY);
         registry.add("bobcrew.max-upload-size", () -> "1MB");
@@ -339,6 +342,10 @@ class ServerIntegrationTest {
         assertThat(container.getHostConfig().getSecurityOpts()).contains("no-new-privileges");
         assertThat(container.getHostConfig().getInit()).isTrue();
         assertThat(container.getHostConfig().getMemory()).isEqualTo(512L * 1024 * 1024);
+        assertThat(container.getHostConfig().getPidsLimit()).as("the default process limit").isEqualTo(4096L);
+        assertThat(container.getHostConfig().getNetworkMode()).isEqualTo(DockerRuntime.DEFAULT_NETWORK);
+        assertThat(TestDocker.client().inspectNetworkCmd().withNetworkId(DockerRuntime.DEFAULT_NETWORK).exec()
+            .getOptions()).as("sessions cannot reach one another").containsEntry(DockerRuntime.ICC_OPTION, "false");
 
         // the environment is the image's plus what the server and the client put there, nothing from this host
         List<String> imageEnv = List.of(TestDocker.client().inspectImageCmd(TestDocker.IMAGE).exec()
@@ -381,8 +388,14 @@ class ServerIntegrationTest {
 
     @Test
     void validatesImagesAndEnvironment() throws Exception {
-        assertThat(createStatus(Map.of("image", "bobcrew-no-such-image:never"))).isEqualTo(400);
+        assertThat(createStatus(Map.of("image", "bobcrew-no-such-image:never"))).as("allowed, not present")
+            .isEqualTo(400);
         assertThat(createStatus(Map.of("image", "bad image name"))).isEqualTo(400);
+        // not on the server's list: refused before Docker is even asked
+        HttpResponse<String> refused = send("POST", "/sessions",
+                JSON.writeValueAsString(Map.of("image", "bobcrew-fake-agent:other")), alice);
+        assertThat(refused.statusCode()).isEqualTo(403);
+        assertThat(refused.body()).contains("not allowed on this server");
         for (String name : List.of("BOB_API_KEY", "BOBSHELL_API_KEY", "PATH", "HOME", "BOBCREW_X", "LD_PRELOAD",
                 "1BAD", "BAD-NAME", "")) {
             assertThat(createStatus(Map.of("env", Map.of(name, "x")))).as(name).isEqualTo(400);
@@ -501,12 +514,20 @@ class ServerIntegrationTest {
     }
 
     @Test
-    void limitsTheNumberOfSessions() throws Exception {
-        for (int i = 0; i < 3; i++) {
-            createSession("limit-" + i);
-        }
-        HttpResponse<String> response = send("POST", "/sessions", "{\"title\":\"limit-4\"}", alice);
-        assertThat(response.statusCode()).isEqualTo(429);
+    void limitsTheNumberOfSessionsPerUserAndInAll() throws Exception {
+        createSession("limit-1");
+        createSession("limit-2");
+        HttpResponse<String> response = send("POST", "/sessions", "{\"title\":\"limit-3\"}", alice);
+        assertThat(response.statusCode()).as("alice's share is full").isEqualTo(429);
+        assertThat(response.body()).contains("per user");
+
+        response = send("POST", "/sessions", "{\"title\":\"bob's\"}", token("bob"));
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(201);
+        created.add(JSON.readTree(response.body()).get("id").asString());
+
+        response = send("POST", "/sessions", "{\"title\":\"carol's\"}", token("carol"));
+        assertThat(response.statusCode()).as("the server is full").isEqualTo(429);
+        assertThat(response.body()).contains("close one first").doesNotContain("per user");
     }
 
     @Test

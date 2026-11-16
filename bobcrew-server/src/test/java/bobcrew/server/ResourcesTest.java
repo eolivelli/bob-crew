@@ -13,7 +13,8 @@ class ResourcesTest {
     private static BobCrewProperties.Docker docker(String memoryLimit, double cpus, String maxMemory, double maxCpus) {
         return new BobCrewProperties.Docker("unix:///var/run/docker.sock", "1.44", "t", "img", "1000:1000",
                 memoryLimit == null ? null : DataSize.parse(memoryLimit), cpus, 0,
-                maxMemory == null ? null : DataSize.parse(maxMemory), maxCpus, "bridge", Duration.ofSeconds(5), 32, 32768);
+                maxMemory == null ? null : DataSize.parse(maxMemory), maxCpus, "bridge", Duration.ofSeconds(5), 32, 32768,
+                java.util.List.of("bobcrew/*"));
     }
 
     @Test

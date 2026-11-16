@@ -6,11 +6,13 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.time.Duration;
+import java.util.Set;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
@@ -78,6 +80,11 @@ class ServerConnection {
 
     private static String readToken(String token, String tokenFile, String serverName) {
         if ((token == null || token.isBlank()) && tokenFile != null && !tokenFile.isBlank()) {
+            if (readableByOthers(Path.of(tokenFile))) {
+                // any other user of this machine could act as you on the server
+                log.warn("The token file {} for server {} is readable by other users; restrict it with chmod 600",
+                        tokenFile, serverName);
+            }
             try {
                 token = Files.readString(Path.of(tokenFile));
             } catch (IOException e) {
@@ -92,6 +99,17 @@ class ServerConnection {
             throw new IllegalStateException("The API token for server " + serverName + " contains characters that cannot be sent in a header");
         }
         return token;
+    }
+
+    /** Whether users other than the owner can read the file; false where POSIX permissions do not apply. */
+    static boolean readableByOthers(Path file) {
+        try {
+            Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(file);
+            return permissions.contains(PosixFilePermission.GROUP_READ)
+                    || permissions.contains(PosixFilePermission.OTHERS_READ);
+        } catch (IOException | UnsupportedOperationException e) {
+            return false;
+        }
     }
 
     /** An SSL context that trusts exactly the certificates in the PEM file. */

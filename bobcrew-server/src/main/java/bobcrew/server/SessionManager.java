@@ -47,11 +47,14 @@ public class SessionManager {
 
     private final List<String> allowedCapabilities;
 
+    private final AllowedImages allowedImages;
+
     SessionManager(BobCrewProperties properties, DockerRuntime docker, SessionAccessPolicy accessPolicy) {
         this.properties = properties;
         this.docker = docker;
         this.accessPolicy = accessPolicy;
         this.allowedCapabilities = Capabilities.allowed(properties.allowedCapabilities());
+        this.allowedImages = new AllowedImages(properties.docker().allowedImages(), docker.defaultImage());
         log.info("Agent: {}", properties.agent());
     }
 
@@ -68,13 +71,15 @@ public class SessionManager {
      * @param repository cloned into the workspace before the agent's session starts, or null
      * @param capabilities what the agent may run besides commands ({@link Capabilities}); null or empty for none
      * @param resources the container's limits, already checked ({@link Resources#of})
-     * @throws ApiException 400 for a bad image, environment, repository or capability, 403 for a capability the
-     * server does not allow, 429 when the server is full, 502 if the agent fails
+     * @throws ApiException 400 for a bad image, environment, repository or capability, 403 for an image or a
+     * capability the server does not allow, 429 when the server or the user's share of it is full, 502 if the
+     * agent fails
      */
     AgentSession create(String owner, String title, String image, Map<String, String> env, GitRepository repository,
             List<String> capabilities, Resources resources) {
         List<String> checkedCapabilities = Capabilities.check(capabilities, allowedCapabilities);
         String chosenImage = image == null || image.isBlank() ? docker.defaultImage() : image.strip();
+        allowedImages.check(chosenImage);
         Map<String, String> checkedEnv = checkEnv(env);
         String id = UUID.randomUUID().toString();
         AgentSession session = new AgentSession(new DockerRuntime.ContainerSpec(id, owner, chosenImage, checkedEnv,
@@ -88,6 +93,13 @@ public class SessionManager {
             if (active >= properties.maxSessions()) {
                 throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "The server already runs "
                         + properties.maxSessions() + " sessions; close one first");
+            }
+            int perUser = properties.maxSessionsPerUser();
+            if (perUser > 0 && sessions.values().stream()
+                .filter(other -> isActive(other) && owner.equals(other.owner()))
+                .count() >= perUser) {
+                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "You already have " + perUser
+                        + " open sessions, the most this server allows per user; close one first");
             }
             sessions.put(session.id(), session);
         }

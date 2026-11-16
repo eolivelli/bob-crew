@@ -23,6 +23,8 @@ bobcrew:
     certificate: ${BOBCREW_TLS_CERT:file:certs/server.crt}
     private-key: ${BOBCREW_TLS_KEY:file:certs/server.key}
   max-sessions: 8
+  # Most open sessions one user may have at a time (0: no limit beyond max-sessions)
+  max-sessions-per-user: ${BOBCREW_MAX_SESSIONS_PER_USER:4}
   # How long initialize, session/new and other short requests may take
   request-timeout: 30s
   # How long one prompt turn may take
@@ -56,18 +58,25 @@ bobcrew:
     # Image used when the client names none. Images are never pulled: they must be present on the
     # Docker host (scripts/build-images.sh, scripts/push-images.sh).
     default-image: ${BOBCREW_DEFAULT_IMAGE:bobcrew/bob-base:latest}
+    # Images a client may name, comma separated; '*' matches any characters (so bobcrew/* is every tag of
+    # every bobcrew/ image). The default image is always allowed. The API checks this, whatever the UI's
+    # roles say: anyone with a token can call the API directly.
+    allowed-images: ${BOBCREW_ALLOWED_IMAGES:bobcrew/*}
     # uid:gid the agent runs as; never root
     user: "1000:1000"
     # Limits for sessions that ask for none (0: no limit). A session can ask for its own memory and CPUs,
     # up to max-memory and max-cpus (0: no cap); with no request and no default, the cap applies.
-    memory-limit: ${BOBCREW_MEMORY_LIMIT:0}
+    # Without a memory limit one session can exhaust the host's memory for everyone.
+    memory-limit: ${BOBCREW_MEMORY_LIMIT:8GB}
     cpus: ${BOBCREW_CPUS:0}
     max-memory: ${BOBCREW_MAX_MEMORY:0}
     max-cpus: ${BOBCREW_MAX_CPUS:0}
-    # Most processes per container (0: no limit)
-    pids-limit: ${BOBCREW_PIDS_LIMIT:0}
-    # Docker network the containers join; the agent needs to reach its model API
-    network: bridge
+    # Most processes per container (0: no limit); stops a fork bomb from taking the host down
+    pids-limit: ${BOBCREW_PIDS_LIMIT:4096}
+    # Docker network the containers join; the agent needs to reach its model API. Created at startup if
+    # missing, as a bridge on which containers cannot reach one another (enable_icc=false). The built-in
+    # networks bridge, host and none are refused: they let sessions talk to each other, or are no isolation.
+    network: ${BOBCREW_DOCKER_NETWORK:bobcrew}
     # How long a container gets to exit after its input is closed, before it is killed
     stop-timeout: 5s
     # Limits on the environment variables a client may pass to a session

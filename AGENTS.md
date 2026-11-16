@@ -68,9 +68,10 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | Class | Role |
 |---|---|
 | `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager`. |
-| `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limit, idle cleanup, shutdown, and the checks on client-supplied environment variables. |
+| `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limits (in all and per user), the image allowlist, idle cleanup, shutdown, and the checks on client-supplied environment variables. |
 | `AgentSession` | One agent container and its ACP session: start (with the repository clone), prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
-| `DockerRuntime` | The only class that talks to Docker: creates containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
+| `DockerRuntime` | The only class that talks to Docker: creates the sessions' network (inter-container traffic off) and containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
+| `AllowedImages` | Which images a client may name (`bobcrew.docker.allowed-images` globs, plus the default image). |
 | `Capabilities`, `Resources` | What a session may run besides commands (`docker`, `libvirt`), checked against `bobcrew.allowed-capabilities`; and its memory and CPU limits, checked against the server's caps. |
 | `GitRepository` | A repository to clone into a new session: checks the URL (allowed schemes, no credentials) and branch, and names the clone's directory. |
 | `ContainerAcpTransport` | The SDK's `AcpClientTransport` over a container's attach streams. The one class of ours with Reactor types, because the SDK interface has them. |
@@ -179,7 +180,10 @@ the maintainer.
   `--`, never through a shell. URLs with credentials are refused: the URL shows in logs, events and the
   session's details.
 - Containers get no host mounts (binds or volumes), no host environment, no capabilities,
-  `no-new-privileges`, and a non-root user enforced by the server. Images are never pulled. Keep it so.
+  `no-new-privileges`, and a non-root user enforced by the server. Images are never pulled, and must match
+  `bobcrew.docker.allowed-images` (`AllowedImages`, checked by the server, not just the UI's roles). They join
+  their own network with inter-container traffic off, never Docker's built-in ones, and get memory and process
+  limits by default. Keep it so.
   The one exception is a session with capabilities: only for capabilities in `bobcrew.allowed-capabilities`
   (default none) that the session asked for, the container is privileged and starts as root, and the entrypoint must still drop
   to `BOBCREW_AGENT_USER` before the agent runs (it exits 77 rather than run the agent as root). Never make

@@ -317,13 +317,15 @@ a server dedicated to users you trust with that.
 
 ## Resources
 
-By default a session's container has no memory, CPU or process limit. A session can ask for limits:
+By default a session's container may use 8GB of memory and 4096 processes, with no CPU limit. A session can
+ask for its own limits:
 `memory` (such as `8GB` or `512MB`) and `cpus` (such as `2` or `0.5`), in its role's front matter, in the
 **Memory** and **CPUs** fields under **Options** (filled from the role, and changeable), or in the API's
 `resources`. The server can set defaults for sessions that ask for nothing (`BOBCREW_MEMORY_LIMIT`,
 `BOBCREW_CPUS`) and caps on what they may ask for (`BOBCREW_MAX_MEMORY`, `BOBCREW_MAX_CPUS`; a session
-asking for nothing then gets the cap). A request above a cap is refused with 400. `BOBCREW_PIDS_LIMIT` caps
-the number of processes in every container. The session header shows what a session got.
+asking for nothing then gets the cap). A request above a cap is refused with 400; with no cap a session may
+ask for more than the default. `BOBCREW_PIDS_LIMIT` caps the number of processes in every container. Set a
+default to `0` to remove it, at the risk of one session taking the whole machine down. The session header shows what a session got.
 
 ## Server configuration
 
@@ -344,16 +346,19 @@ Set as environment variables, or as the Spring properties in
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | The Docker daemon |
 | `BOBCREW_DOCKER_API_VERSION` | `1.44` | Docker Engine API version (Docker 29 needs 1.44 or newer) |
 | `BOBCREW_DEFAULT_IMAGE` | `bobcrew/bob-base:latest` | Image for sessions whose role names none |
+| `BOBCREW_ALLOWED_IMAGES` | `bobcrew/*` | Images a session may name, comma separated; `*` matches anything. The default image is always allowed |
+| `BOBCREW_DOCKER_NETWORK` | `bobcrew` | The sessions' Docker network, created if missing ([Security](#security)) |
+| `BOBCREW_MAX_SESSIONS_PER_USER` | `4` | Most open sessions one user may have (`0`: only `bobcrew.max-sessions` applies) |
 | `BOBCREW_INSTANCE_ID` | `default` | Labels this server's containers; servers sharing a Docker daemon need different ids |
 | `BOBCREW_ALLOWED_CAPABILITIES` | none | [Capabilities](#capabilities-docker-and-virtual-machines) sessions may ask for: `docker`, `libvirt`, comma separated (their users can become root on the server) |
-| `BOBCREW_MEMORY_LIMIT`, `BOBCREW_CPUS` | `0` (no limit) | Limits for sessions that ask for none ([Resources](#resources)) |
+| `BOBCREW_MEMORY_LIMIT`, `BOBCREW_CPUS` | `8GB`, `0` (no limit) | Limits for sessions that ask for none ([Resources](#resources)) |
 | `BOBCREW_MAX_MEMORY`, `BOBCREW_MAX_CPUS` | `0` (no cap) | The most a session may ask for |
-| `BOBCREW_PIDS_LIMIT` | `0` (no limit) | Most processes per container |
+| `BOBCREW_PIDS_LIMIT` | `4096` | Most processes per container (`0`: no limit) |
 
 Further properties: `bobcrew.max-sessions` (8), `bobcrew.request-timeout` (30s),
 `bobcrew.prompt-timeout` (10m), `bobcrew.permission-timeout` (2m), `bobcrew.idle-timeout` (12h),
 `bobcrew.event-buffer-size` (5000), and per container `bobcrew.docker.user` (`1000:1000`, never root),
-`bobcrew.docker.network` (`bridge`), `bobcrew.docker.stop-timeout` (5s), `bobcrew.docker.max-env-vars`
+`bobcrew.docker.stop-timeout` (5s), `bobcrew.docker.max-env-vars`
 (32), `bobcrew.docker.max-env-value-length` (32768); for repositories, `bobcrew.git.clone-timeout` (10m) and
 `bobcrew.git.allowed-schemes` (`https`).
 
@@ -385,11 +390,21 @@ Notes on Bob:
   see and use every session; prompts and permission answers record who made them.
 - **Isolation**: each session is a container with no host directories, no host environment, a
   non-root user, no capabilities and resource limits. The workspace, `/opt/workspace`, lives and dies
-  with the container. Containers share Docker's default bridge network, as the agent needs to reach its
-  model API. Sessions with [capabilities](#capabilities-docker-and-virtual-machines), off by default, give
+  with the container. Sessions can open outgoing connections (the agent needs to reach its model API) but not
+  one another: they join their own network (`bobcrew` by default), which the server creates at startup with
+  inter-container traffic off (`com.docker.network.bridge.enable_icc=false`). Docker's built-in `bridge`,
+  `host` and `none` networks are refused; a network that exists already is used as it is, with a warning in
+  the log if containers on it can reach one another. Containers can still reach the Docker host and the
+  networks it can reach, cloud metadata services included; block those on the host, for example
+  `iptables -I DOCKER-USER -i br-$(docker network inspect -f '{{.Id}}' bobcrew | cut -c1-12) -d 169.254.169.254 -j DROP`,
+  and the same for private address ranges the sessions have no business reaching. Sessions with [capabilities](#capabilities-docker-and-virtual-machines), off by default, give
   this up: their users can become root on the server.
-- **Images**: never pulled. Whoever runs Docker on the server decides what can run; a client naming an
-  image that is not there gets 400.
+- **Images**: never pulled, and limited to `BOBCREW_ALLOWED_IMAGES` (by default `bobcrew/*`, plus the default
+  image). The server checks this itself, since anyone with a token can call the API without the UI's roles: a
+  client naming an image not on the list gets 403, one that is on it but not on the Docker host gets 400.
+- **Quotas**: at most `bobcrew.max-sessions` open sessions in all and `BOBCREW_MAX_SESSIONS_PER_USER` per
+  user (429 beyond either), each with the memory and process limits of [Resources](#resources), so that one
+  user or one runaway session cannot take the machine from everyone else.
 - **Environment variables**: a client may set at most 32, with plain names; `BOB_API_KEY`,
   `BOBSHELL_API_KEY`, `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `HOSTNAME`, `BOBCREW_*` and `LD_*` are refused.
   Their values are never logged or returned (only the names are logged). Anyone who can use a session
@@ -406,7 +421,8 @@ Notes on Bob:
 - **The UI app** has no login, so it listens on `127.0.0.1` only and holds the token itself; the
   token never reaches the browser's JavaScript. It refuses requests whose `Host` is not the
   loopback interface, requests from other origins, and changes without its `X-BobCrew` header, so
-  that another web page open in the same browser cannot use it.
+  that another web page open in the same browser cannot use it. It warns at startup if a token file can be
+  read by other users of the machine.
 
 ## API
 

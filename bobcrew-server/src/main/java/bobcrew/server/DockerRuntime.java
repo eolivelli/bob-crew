@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -20,6 +21,7 @@ import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.BlkioStatEntry;
@@ -29,6 +31,7 @@ import com.github.dockerjava.api.model.CpuStatsConfig;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.MemoryStatsConfig;
+import com.github.dockerjava.api.model.Network;
 import com.github.dockerjava.api.model.Statistics;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.core.DockerClientConfig;
@@ -48,7 +51,7 @@ import org.springframework.stereotype.Component;
  * recognised and removed at startup.
  *
  * <p>Containers get no host directories, no host environment and no capabilities; they run as a fixed
- * non-root user. Images are never pulled: one that is not on the Docker host is refused, so what can run is
+ * non-root user, on a network of their own where they cannot reach one another. Images are never pulled: one that is not on the Docker host is refused, so what can run is
  * decided by whoever manages that host.
  *
  * <p>The exception is a session with {@link Capabilities} (allowed by the server, and asked for at creation),
@@ -73,7 +76,16 @@ class DockerRuntime implements Closeable {
 
     static final String LABEL_CAPABILITIES = "bobcrew.capabilities";
 
-    private static final Pattern IMAGE = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}");
+    /** The network sessions join unless configured otherwise; created at startup if missing. */
+    static final String DEFAULT_NETWORK = "bobcrew";
+
+    /** Docker's own networks, which give sessions either a shared bridge or no isolation at all. */
+    private static final Set<String> BUILT_IN_NETWORKS = Set.of("bridge", "host", "none", "default");
+
+    /** Docker's bridge option that, when false, stops containers on the network from reaching one another. */
+    static final String ICC_OPTION = "com.docker.network.bridge.enable_icc";
+
+    static final Pattern IMAGE = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}");
 
     private static final Pattern INSTANCE_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,62}");
 
@@ -147,7 +159,46 @@ class DockerRuntime implements Closeable {
             log.warn("Sessions may ask for {}: their containers are privileged, and their users can become root on "
                     + "this Docker host", capabilities);
         }
+        ensureNetwork();
         removeOrphans();
+    }
+
+    /**
+     * Makes sure the sessions' network exists, creating it as a bridge on which containers cannot talk to one
+     * another: a session must not reach another session's agent, files or services. Docker's built-in networks
+     * are refused. A network that already exists is used as it is, with a warning if it lets containers talk.
+     */
+    private void ensureNetwork() {
+        String name = settings.network() == null ? "" : settings.network().strip();
+        if (name.isEmpty() || BUILT_IN_NETWORKS.contains(name) || name.startsWith("container:")) {
+            throw new IllegalStateException("bobcrew.docker.network must name a network of its own (default "
+                    + DEFAULT_NETWORK + "), not '" + name + "': Docker's built-in networks let sessions reach one "
+                    + "another, or the host's network");
+        }
+        Network network;
+        try {
+            network = client.inspectNetworkCmd().withNetworkId(name).exec();
+        } catch (NotFoundException e) {
+            try {
+                client.createNetworkCmd()
+                    .withName(name)
+                    .withDriver("bridge")
+                    .withOptions(Map.of(ICC_OPTION, "false"))
+                    .withLabels(Map.of(LABEL_MANAGED, "true"))
+                    .exec();
+                log.info("Created the Docker network {} for sessions (containers cannot reach one another)", name);
+                return;
+            } catch (ConflictException conflict) {
+                // another server created it at the same moment
+                network = client.inspectNetworkCmd().withNetworkId(name).exec();
+            }
+        }
+        if ("bridge".equals(network.getDriver()) && (network.getOptions() == null
+                || !"false".equals(network.getOptions().get(ICC_OPTION)))) {
+            log.warn("The Docker network {} lets containers reach one another; sessions can talk to each other's "
+                    + "containers. Recreate it with -o {}=false, or remove it and let the server create it", name,
+                    ICC_OPTION);
+        }
     }
 
     String defaultImage() {
@@ -199,7 +250,7 @@ class DockerRuntime implements Closeable {
         labels.put(LABEL_OWNER, spec.owner());
         HostConfig host = HostConfig.newHostConfig()
             .withInit(true)
-            .withNetworkMode(settings.network())
+            .withNetworkMode(settings.network().strip())
             .withAutoRemove(false);
         if (spec.resources().memoryBytes() != null) {
             host.withMemory(spec.resources().memoryBytes());
