@@ -300,6 +300,9 @@ function renderUpdate(data) {
     case 'current_mode_update':
       if (data.currentModeId) $('session-mode').value = data.currentModeId;
       break;
+    case 'available_commands_update':
+      // the agent lists its slash commands at session start; the page has no use for them
+      break;
     default:
       // unknown kinds: pass through visibly rather than dropping them
       add(el('pre', 'card unknown', JSON.stringify(data, null, 2)));

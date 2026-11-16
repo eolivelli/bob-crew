@@ -179,6 +179,8 @@ class UiProxyTest {
         // the behaviour is in app.js and is checked by hand; here only that the page offers it
         assertThat(get("/").body()).contains("id=\"new-role\"").contains("id=\"show-roles\"").contains("id=\"roles-view\"");
         assertThat(get("/app.js").body()).contains("function showRoles").doesNotContain("innerHTML");
+        // the agent's command list is not shown as a raw JSON card
+        assertThat(get("/app.js").body()).contains("case 'available_commands_update':");
     }
 
     @Test
