@@ -1,0 +1,51 @@
+# Builds everything and runs all tests: the server's integration tests start the fake agent in real Docker
+# containers (the runner's Docker; they build bobcrew-fake-agent:test first, which pulls its base image),
+# and the UI's JavaScript tests run with Node.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Docker
+        run: docker version
+
+      - name: Build and test
+        # fail, rather than skip, the Docker tests if Docker does not work here
+        env:
+          BOBCREW_REQUIRE_DOCKER: 'true'
+        run: mvn --batch-mode --no-transfer-progress install
+
+      - name: Test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: '**/target/surefire-reports/'
+          retention-days: 7

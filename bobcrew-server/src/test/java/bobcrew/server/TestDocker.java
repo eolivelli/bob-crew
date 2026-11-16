@@ -24,7 +24,9 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 /**
  * Docker for the tests. As a JUnit condition ({@code @ExtendWith(TestDocker.class)}) it skips the test class
  * when no Docker daemon answers, before Spring starts (the server refuses to start without one); otherwise it
- * builds the fake agent's image, {@value #IMAGE}, once per test run.
+ * builds the fake agent's image, {@value #IMAGE}, once per test run. With the environment variable
+ * {@code BOBCREW_REQUIRE_DOCKER=true} (as in CI) a missing daemon or image fails the tests instead, so that
+ * they cannot pass by being skipped.
  */
 final class TestDocker implements ExecutionCondition {
 
@@ -42,6 +44,10 @@ final class TestDocker implements ExecutionCondition {
     @Override
     public ConditionEvaluationResult evaluateExecutionCondition(ExtensionContext context) {
         String reason = prepare();
+        if (reason != null && Boolean.parseBoolean(System.getenv("BOBCREW_REQUIRE_DOCKER"))) {
+            throw new IllegalStateException(reason.replace("; Docker tests skipped", "")
+                    + "; failing, since BOBCREW_REQUIRE_DOCKER is set");
+        }
         return reason == null ? ConditionEvaluationResult.enabled("Docker is available")
                 : ConditionEvaluationResult.disabled(reason);
     }

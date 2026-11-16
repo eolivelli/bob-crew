@@ -1,5 +1,7 @@
 # bob-crew
 
+[![CI](https://github.com/eolivelli/bob-crew/actions/workflows/ci.yml/badge.svg)](https://github.com/eolivelli/bob-crew/actions/workflows/ci.yml)
+
 > [!WARNING]
 > **For testing purposes only. Not meant to be used in production.**
 >
@@ -50,6 +52,10 @@ needed.
 ```
 mvn install
 ```
+
+With `BOBCREW_REQUIRE_DOCKER=true`, a missing Docker daemon fails the tests instead of skipping them. GitHub
+Actions runs the whole build on
+every push to `main` and every pull request ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ## Session images
 

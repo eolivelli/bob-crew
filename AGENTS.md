@@ -35,7 +35,8 @@ Tests never need Bob or an API key: the server tests run `bobcrew-fake-agent` in
 an image they build once per run (`bobcrew-fake-agent:test`, from
 `bobcrew-server/src/test/docker/fake-agent/Dockerfile` plus `docker/bob-base/bobcrew-entrypoint.sh`).
 They need a Docker daemon and are skipped, not failed, without one (`TestDocker`, a JUnit condition, decides
-before Spring starts). The only network use is building that image the first time (its base, and
+before Spring starts), unless `BOBCREW_REQUIRE_DOCKER=true`, which CI (`.github/workflows/ci.yml`) sets so that
+they fail instead. The only network use is building that image the first time (its base, and
 `microdnf install git-core`). The image holds a bare repository, `/opt/test-repos/sample.git` (branches
 `main` and `feature`), which the tests clone over `file://` (allowed only in tests, through
 `bobcrew.git.allowed-schemes`). Do not add a test that requires the real `bob` binary, the `bobcrew/bob-*`
