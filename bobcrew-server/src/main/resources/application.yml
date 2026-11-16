@@ -93,6 +93,9 @@ bobcrew:
   # docker.user. Users of such sessions can become root on this Docker host: allow them only for users you
   # trust with that. None by default.
   allowed-capabilities: ${BOBCREW_ALLOWED_CAPABILITIES:}
+  # Users (token subjects, comma separated) who may see, use and close every session. Everyone else sees only
+  # the sessions they created and those shared with them.
+  admin-users: ${BOBCREW_ADMIN_USERS:}
   auth:
     jwt-secret-file: ${BOBCREW_JWT_SECRET_FILE:}
     revoked-jti-file: ${BOBCREW_REVOKED_JTI_FILE:}

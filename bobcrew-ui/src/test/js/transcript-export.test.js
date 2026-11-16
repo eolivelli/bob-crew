@@ -21,6 +21,8 @@ const events = [
   ev(12, 'turn_end', { stopReason: 'cancelled' }),
   ev(13, 'error', { message: evil }),
   ev(14, 'status', { status: 'IDLE' }),
+  ev(15, 'shared', { users: ['bob', evil] }, 'alice'),
+  ev(16, 'shared', { users: [] }, 'alice'),
 ];
 const session = { id: 'abc', title: 'My <b>session</b> / x', agent: 'Bob 2.1.0', image: 'bobcrew/bob-<base>:latest', owner: 'alice' };
 const html = ctx.buildTranscriptHtml(session, events, { exportedAt: new Date('2026-11-13T11:00:00Z'), exportedBy: 'me' });
@@ -33,6 +35,8 @@ assert(html.includes('>Hello &lt;script'), 'agent chunks merge');
 assert.strictEqual((html.match(/card plan/g) || []).length, 1, 'one plan card');
 assert(html.includes('<li class="completed">a</li>') && !html.includes('in_progress">&lt;'), 'plan replaced');
 assert(html.includes('alice chose: Allow'));
+assert(html.includes('alice shared the session with bob, &lt;script&gt;'), 'sharing shown, escaped');
+assert(html.includes('alice stopped sharing the session'));
 assert(html.includes('turn ended: cancelled'));
 assert(html.includes('status-completedonclickx') , 'status token sanitised');
 assert(html.includes('out &lt;script&gt;') && html.includes('--- /a'));

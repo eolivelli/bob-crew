@@ -86,6 +86,7 @@ class ServerIntegrationTest {
         registry.add("bobcrew.auth.revoked-jti-file", revokedFile::toString);
         registry.add("bobcrew.max-sessions", () -> "3");
         registry.add("bobcrew.max-sessions-per-user", () -> "2");
+        registry.add("bobcrew.admin-users", () -> "admin");
         // allowed, so that its absence is what gets it refused
         registry.add("bobcrew.docker.allowed-images", () -> "bobcrew/*,bobcrew-no-such-image:*");
         registry.add("bobcrew.permission-timeout", () -> "2s");
@@ -105,12 +106,15 @@ class ServerIntegrationTest {
 
     private final String alice = token("alice");
 
+    /** Closes what the tests created, whoever created it. */
+    private final String admin = token("admin");
+
     private final List<String> created = new ArrayList<>();
 
     @AfterEach
     void closeSessions() throws Exception {
         for (String id : created) {
-            send("DELETE", "/sessions/" + id, null, alice);
+            send("DELETE", "/sessions/" + id, null, admin);
         }
     }
 
@@ -195,19 +199,80 @@ class ServerIntegrationTest {
         assertThat(replay.get(0).get("seq").asLong()).isEqualTo(seen + 1);
         assertThat(replay).hasSize(events.size() - (int) seen);
 
-        // another user sees and can use the session
+        // another user can neither see nor use it, until its owner shares it
         String carol = token("carol");
+        assertThat(JSON.readTree(send("GET", "/sessions", null, carol).body())).isEmpty();
+        assertThat(send("GET", "/sessions/" + id, null, carol).statusCode()).isEqualTo(404);
+        assertThat(send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"me too\"}", carol).statusCode())
+            .isEqualTo(404);
+        share(id, alice, "carol");
         assertThat(JSON.readTree(send("GET", "/sessions", null, carol).body()).get(0).get("id").asString())
             .isEqualTo(id);
         assertThat(send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"me too\"}", carol).statusCode())
             .isEqualTo(202);
         List<JsonNode> second = events(id, events.size(), event -> isStatus(event, "IDLE"));
+        JsonNode shared = first(second, "shared");
+        assertThat(shared.get("user").asString()).isEqualTo("alice");
+        assertThat(shared.get("data").get("users").get(0).asString()).isEqualTo("carol");
         assertThat(first(second, "user_prompt").get("user").asString()).isEqualTo("carol");
 
         // nothing a client can read contains the agent's API key
         String everything = events.toString() + second + send("GET", "/sessions", null, alice).body()
                 + send("GET", "/sessions/" + id, null, alice).body();
         assertThat(everything).doesNotContain(API_KEY);
+    }
+
+    @Test
+    void onlyTheOwnerOrAnAdminClosesOrSharesASession() throws Exception {
+        String id = createSession("shared").get("id").asString();
+        String carol = token("carol");
+        String sharing = "/sessions/" + id + "/sharing";
+        HttpResponse<String> response = send("PUT", sharing, "{\"users\":[\"carol\",\"alice\",\" bob \"]}", alice);
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+        assertThat(JSON.readTree(response.body()).get("sharedWith").toString()).isEqualTo("[\"bob\",\"carol\"]");
+
+        response = send("DELETE", "/sessions/" + id, null, carol);
+        assertThat(response.statusCode()).isEqualTo(403);
+        assertThat(response.body()).contains("Only the session's owner can close it");
+        assertThat(send("PUT", sharing, "{\"users\":[\"carol\",\"mallory\"]}", carol).statusCode()).isEqualTo(403);
+        assertThat(send("PUT", sharing, "{\"users\":[\"x\"]}", token("mallory")).statusCode()).isEqualTo(404);
+
+        assertThat(send("PUT", sharing, "{}", alice).statusCode()).isEqualTo(400);
+        assertThat(send("PUT", sharing, "{\"users\":[\"bad\\nname\"]}", alice).statusCode()).isEqualTo(400);
+        assertThat(send("PUT", sharing, "{\"users\":[\"\"]}", alice).statusCode()).isEqualTo(400);
+        assertThat(send("PUT", sharing, JSON.writeValueAsString(Map.of("users",
+                java.util.stream.IntStream.range(0, 51).mapToObj(i -> "user" + i).toList())), alice).statusCode())
+            .isEqualTo(400);
+
+        // an admin sees every session, and may re-share and close it
+        assertThat(JSON.readTree(send("GET", "/me", null, admin).body()).get("admin").asBoolean()).isTrue();
+        assertThat(JSON.readTree(send("GET", "/me", null, alice).body()).get("admin").asBoolean()).isFalse();
+        assertThat(JSON.readTree(send("GET", "/sessions", null, admin).body()).get(0).get("id").asString())
+            .isEqualTo(id);
+        share(id, admin);
+        assertThat(send("GET", "/sessions/" + id, null, carol).statusCode()).isEqualTo(404);
+        assertThat(send("DELETE", "/sessions/" + id, null, admin).statusCode()).isEqualTo(204);
+        created.remove(id);
+    }
+
+    @Test
+    void withdrawingASharingEndsThatUsersEventStream() throws Exception {
+        String id = createSession(null).get("id").asString();
+        String carol = token("carol");
+        share(id, alice, "carol");
+        HttpResponse<java.util.stream.Stream<String>> stream = http.send(request("/sessions/" + id + "/events", carol)
+            .build(), HttpResponse.BodyHandlers.ofLines());
+        assertThat(stream.statusCode()).isEqualTo(200);
+        CompletableFuture<List<String>> lines = CompletableFuture.supplyAsync(() -> stream.body().toList());
+        // carol's stream is live: her own prompt shows up in it
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"still here\"}", carol);
+        events(id, 0, event -> "turn_end".equals(event.get("type").asString()));
+
+        share(id, alice);
+        List<String> received = lines.get(10, TimeUnit.SECONDS);
+        assertThat(String.join("\n", received)).contains("still here")
+            .as("nothing after the withdrawal, its own event included").doesNotContain("\"users\":[]");
+        assertThat(send("GET", "/sessions/" + id + "/events", null, carol).statusCode()).isEqualTo(404);
     }
 
     @Test
@@ -222,6 +287,9 @@ class ServerIntegrationTest {
 
         String path = "/sessions/" + id + "/permissions/" + toolCallId;
         assertThat(send("POST", path, "{\"optionId\":\"not-offered\"}", alice).statusCode()).isEqualTo(400);
+        assertThat(send("POST", path, "{\"optionId\":\"allow\"}", token("dave")).statusCode())
+            .as("not shared with dave").isEqualTo(404);
+        share(id, alice, "dave");
         assertThat(send("POST", path, "{\"optionId\":\"allow\"}", token("dave")).statusCode()).isEqualTo(204);
         assertThat(send("POST", path, "{\"optionId\":\"allow\"}", alice).statusCode()).as("already answered")
             .isIn(404, 409);
@@ -457,6 +525,7 @@ class ServerIntegrationTest {
         List<JsonNode> before = events(id, 0, event -> isStatus(event, "IDLE") && event.get("seq").asLong() > 1);
         assertThat(exists(container, "/opt/workspace/out/hello.txt")).isTrue();
 
+        share(id, alice, "carol");
         HttpResponse<String> cleared = send("POST", "/sessions/" + id + "/clear", null, token("carol"));
         assertThat(cleared.statusCode()).as(cleared.body()).isEqualTo(200);
         JsonNode info = JSON.readTree(cleared.body());
@@ -735,6 +804,12 @@ class ServerIntegrationTest {
         JsonNode session = JSON.readTree(response.body());
         created.add(session.get("id").asString());
         return session;
+    }
+
+    private void share(String id, String as, String... users) throws Exception {
+        HttpResponse<String> response = send("PUT", "/sessions/" + id + "/sharing",
+                JSON.writeValueAsString(Map.of("users", List.of(users))), as);
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
     }
 
     private int createStatus(Map<String, Object> body) throws Exception {

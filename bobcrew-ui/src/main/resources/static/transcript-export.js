@@ -93,6 +93,13 @@ function workspaceEventText(event) {
   return '';
 }
 
+// The one-line description of a shared event: who the session's owner (or an admin) now shares it with.
+function sharedEventText(event) {
+  const users = (event.data && Array.isArray(event.data.users)) ? event.data.users : [];
+  return `${event.user || 'someone'} ` + (users.length ? `shared the session with ${users.join(', ')}`
+    : 'stopped sharing the session');
+}
+
 function transcriptItems(events) {
   const items = [];
   const toolCalls = new Map();
@@ -189,6 +196,9 @@ function transcriptItems(events) {
       case 'file_uploaded':
       case 'repository_cloned':
         items.push({ type: 'divider', text: workspaceEventText(event) });
+        break;
+      case 'shared':
+        items.push({ type: 'divider', text: sharedEventText(event) });
         break;
       default: break;
     }

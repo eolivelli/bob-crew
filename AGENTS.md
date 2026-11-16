@@ -79,7 +79,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `EventLog` | A session's numbered events with replay; one queue per subscriber. |
 | `UiEvent` | The event record clients receive, and the event type names. |
 | `ContainerPaths` | Turns a client-supplied file path into a path inside `/opt/workspace` of the container. The only place that does. |
-| `SessionAccessPolicy` | Who may use a session. Currently everyone; narrow it here and nowhere else. |
+| `SessionAccessPolicy` | Who may use a session (owner, users it is shared with, admins) and who may close or re-share it (owner, admins). Decide access here and nowhere else. |
 | `SecurityConfig` | JWT validation (signature, expiry, issuer, audience, subject, revocation list). |
 | `Tokens`, `IssueTokenCommand` | Secret loading and the `issue-token` command line. |
 | `BobCrewProperties` | All `bobcrew.*` settings. Defaults live here and in `application.yml`; keep the two in step. |
@@ -192,6 +192,10 @@ the maintainer.
 - Session creation from the browser goes through the UI's role expansion: the page never sees
   environment variable values and cannot pick an image, variables or a repository itself. It may ask for
   `capabilities` and `resources`; the server decides whether they are allowed.
+- A session is its owner's: other users see it only once it is shared with them, and only the owner or an admin
+  closes or re-shares it. Every endpoint reaches a session through `SessionManager` with the caller's name, which
+  asks `SessionAccessPolicy`; a session the caller may not use answers 404, never 403, so that its existence does
+  not leak. Anything long-lived (the event stream) checks access again as it goes.
 - The server has no cookies and no CORS headers. Adding either creates a CSRF surface that does
   not exist today.
 - The UI app binds to `127.0.0.1` and has no login; `LocalOnlyFilter` (Host, Origin,

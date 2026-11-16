@@ -48,7 +48,7 @@ final class AgentSession {
     }
 
     /** What clients see of a session. */
-    record Info(String id, String owner, String title, String image, String containerId, GitRepository repository,
+    record Info(String id, String owner, List<String> sharedWith, String title, String image, String containerId, GitRepository repository,
             List<String> capabilities, Resources resources, Status status, String agent, String currentMode, List<Mode> modes, Instant createdAt, Instant updatedAt,
             long lastSeq) {
     }
@@ -109,6 +109,9 @@ final class AgentSession {
 
     private volatile boolean firstPrompt = true;
 
+    /** Users other than the owner who may use the session; see {@link SessionAccessPolicy}. */
+    private volatile Set<String> sharedWith = Set.of();
+
     /** Whether the repository is in the workspace: cloned, and not wiped since. */
     private volatile boolean repositoryPresent;
 
@@ -135,6 +138,21 @@ final class AgentSession {
         return owner;
     }
 
+    Set<String> sharedWith() {
+        return sharedWith;
+    }
+
+    /**
+     * Replaces the users the session is shared with, and records who did it in the event log, which every user
+     * of the session sees. Who may do this is {@link SessionAccessPolicy}'s decision, made before.
+     * @param users already checked names, without the owner
+     */
+    void share(String by, Set<String> users) {
+        sharedWith = Set.copyOf(users);
+        updatedAt = Instant.now();
+        events.append(UiEvent.SHARED, by, Map.of("users", users.stream().sorted().toList()));
+    }
+
     Status status() {
         return status;
     }
@@ -152,7 +170,7 @@ final class AgentSession {
     }
 
     Info info() {
-        return new Info(id, owner, title, spec.image(), DockerRuntime.shortId(containerId), repository, spec.capabilities(), spec.resources(),
+        return new Info(id, owner, sharedWith.stream().sorted().toList(), title, spec.image(), DockerRuntime.shortId(containerId), repository, spec.capabilities(), spec.resources(),
                 status,
                 agentName,
                 currentMode, modes, createdAt, updatedAt, events.lastSeq());

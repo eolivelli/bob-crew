@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -34,6 +35,9 @@ public class SessionManager {
     /** Names a client may not set: they carry the server's secrets or would change how the agent starts. */
     private static final Set<String> RESERVED_ENV = Set.of("BOB_API_KEY", "BOBSHELL_API_KEY", "PATH", "HOME", "USER",
             "LOGNAME", "SHELL", "HOSTNAME");
+
+    /** Most users a session can be shared with. */
+    static final int MAX_SHARED_USERS = 50;
 
     private final Map<String, AgentSession> sessions = new ConcurrentHashMap<>();
 
@@ -145,27 +149,77 @@ public class SessionManager {
         return checked;
     }
 
-    /** @throws ApiException 404 if there is no such session or the user may not use it */
+    /**
+     * @throws ApiException 404 if there is no such session or the user may not use it: a session someone else
+     * has not shared with you does not exist, as far as you can tell
+     */
     AgentSession get(String user, String id) {
         AgentSession session = sessions.get(id);
-        if (session == null || !accessPolicy.canAccess(user, session)) {
+        if (session == null || !accessPolicy.canUse(user, session)) {
             throw new ApiException(HttpStatus.NOT_FOUND, "No such session");
         }
         return session;
     }
 
+    /** Whether {@code user} may still use {@code session}: sharing can be withdrawn while a client follows it. */
+    boolean canUse(String user, AgentSession session) {
+        return accessPolicy.canUse(user, session);
+    }
+
+    boolean isAdmin(String user) {
+        return accessPolicy.isAdmin(user);
+    }
+
+    /** @throws ApiException 404 as {@link #get}, 403 if the user may use the session but not {@code action} */
+    private AgentSession getToManage(String user, String id, String action) {
+        AgentSession session = get(user, id);
+        if (!accessPolicy.canManage(user, session)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "Only the session's owner can " + action);
+        }
+        return session;
+    }
+
+    /**
+     * Shares the session with exactly {@code users} (an empty list makes it the owner's alone again). Only its
+     * owner or an admin may.
+     * @throws ApiException 400 for a bad list, 403 if the user may not, 404 as {@link #get}
+     */
+    AgentSession.Info share(String user, String id, List<String> users) {
+        AgentSession session = getToManage(user, id, "change who it is shared with");
+        if (users == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "users is required: the names to share with, or []");
+        }
+        if (users.size() > MAX_SHARED_USERS) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "A session can be shared with at most "
+                    + MAX_SHARED_USERS + " users");
+        }
+        Set<String> checked = new TreeSet<>();
+        for (String name : users) {
+            String trimmed = name == null ? "" : name.strip();
+            if (trimmed.isEmpty() || trimmed.length() > 200 || trimmed.chars().anyMatch(Character::isISOControl)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid user name in users");
+            }
+            if (!trimmed.equals(session.owner())) {
+                checked.add(trimmed);
+            }
+        }
+        session.share(user, checked);
+        log.info("Session {} shared by {} with {}", id, user, checked.isEmpty() ? "nobody" : checked);
+        return session.info();
+    }
+
     List<AgentSession.Info> list(String user) {
         return sessions.values()
             .stream()
-            .filter(session -> accessPolicy.canAccess(user, session))
+            .filter(session -> accessPolicy.canUse(user, session))
             .map(AgentSession::info)
             .sorted(Comparator.comparing(AgentSession.Info::createdAt).reversed())
             .toList();
     }
 
-    /** Closes the session, removes its container and forgets it. */
+    /** Closes the session, removes its container and forgets it. Only its owner or an admin may. */
     void close(String user, String id) {
-        AgentSession session = get(user, id);
+        AgentSession session = getToManage(user, id, "close it");
         session.close();
         sessions.remove(id);
         log.info("Session {} closed by {}", id, user);

@@ -55,6 +55,9 @@ class SessionController {
     record ResourcesRequest(String memory, Double cpus) {
     }
 
+    record ShareRequest(List<String> users) {
+    }
+
     record ClearRequest(Boolean wipeWorkspace) {
     }
 
@@ -87,6 +90,7 @@ class SessionController {
     Map<String, Object> me(Principal principal) {
         Map<String, Object> me = new java.util.LinkedHashMap<>();
         me.put("user", principal.getName());
+        me.put("admin", sessions.isAdmin(principal.getName()));
         me.put("capabilities", sessions.allowedCapabilities());
         BobCrewProperties.Docker docker = properties.docker();
         me.put("maxMemoryBytes", docker.maxMemory() == null || docker.maxMemory().toBytes() <= 0 ? null
@@ -166,6 +170,15 @@ class SessionController {
         return sessions.metrics(principal.getName(), id);
     }
 
+    /**
+     * Shares the session with exactly the users named (replacing the earlier list; {@code []} for nobody). Only
+     * the owner or an admin may.
+     */
+    @PutMapping("/sessions/{id}/sharing")
+    AgentSession.Info share(@PathVariable String id, @RequestBody ShareRequest request, Principal principal) {
+        return sessions.share(principal.getName(), id, request.users());
+    }
+
     @DeleteMapping("/sessions/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     void close(@PathVariable String id, Principal principal) {
@@ -228,7 +241,9 @@ class SessionController {
      * they happen. Each event's id is its sequence number. When the session is closed the stream
      * finishes with an event named {@code end}.
      *
-     * <p>The stream is written from this request's own (virtual) thread until the client goes away.
+     * <p>The stream is written from this request's own (virtual) thread until the client goes away, or until the
+     * user may no longer use the session (its owner stopped sharing it): access is checked again before every
+     * event, so nothing after that reaches them.
      */
     @GetMapping("/sessions/{id}/events")
     void events(@PathVariable String id, @RequestParam(defaultValue = "0") long after,
@@ -251,6 +266,10 @@ class SessionController {
             write(out, ": connected\n\n");
             while (!subscription.isFinished()) {
                 UiEvent event = subscription.poll(KEEPALIVE);
+                if (!sessions.canUse(principal.getName(), session)) {
+                    // a reconnecting client then gets 404, like any session it may not see
+                    return;
+                }
                 if (event == null) {
                     if (!subscription.isFinished()) {
                         // also how a client that went away is noticed

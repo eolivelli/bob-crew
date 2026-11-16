@@ -229,7 +229,8 @@ function showHeader(session) {
     + (session.resources ? ` · ${resourcesText(session.resources)}` : '')
     + (session.repository ? ` · repository ${session.repository.url}`
       + (session.repository.branch ? ` (${session.repository.branch})` : '') : '')
-    + `${session.containerId ? ' · container ' + session.containerId : ''} · owner ${session.owner}`;
+    + `${session.containerId ? ' · container ' + session.containerId : ''} · owner ${session.owner}`
+    + (session.sharedWith && session.sharedWith.length ? ` · shared with ${session.sharedWith.join(', ')}` : '');
   setStatus(session.status);
   const select = $('session-mode');
   select.replaceChildren(...(session.modes || []).map((mode) => {
@@ -343,6 +344,10 @@ function render(event) {
     case 'file_uploaded':
     case 'repository_cloned':
       add(el('div', 'divider', workspaceEventText(event)));
+      break;
+    case 'shared':
+      add(el('div', 'divider', sharedEventText(event)));
+      refreshSessions();
       break;
     default: break;
   }
@@ -747,6 +752,23 @@ $('metrics-toggle').addEventListener('click', async () => {
   $('metrics-updated').textContent = 'sampling…';
   await loadMetrics();
   scheduleMetrics();
+});
+
+// Only the owner (or an admin) may change this; the server says so otherwise.
+$('share').addEventListener('click', async () => {
+  const session = currentSession();
+  if (!session) return;
+  const answer = window.prompt('Share this session with (user names, comma separated; empty for nobody). '
+    + 'They can prompt the agent, answer its permission requests and see everything it has, '
+    + 'including the secrets the session was given.', (session.sharedWith || []).join(', '));
+  if (answer === null) return;
+  const users = answer.split(',').map((name) => name.trim()).filter((name) => name);
+  try {
+    await api('PUT', sessionApi('/sharing'), { users });
+    refreshSessions();
+  } catch (e) {
+    notify(e.message);
+  }
 });
 
 $('close').addEventListener('click', async () => {

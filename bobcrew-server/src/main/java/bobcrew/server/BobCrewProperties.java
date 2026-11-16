@@ -24,6 +24,7 @@ public record BobCrewProperties(
         @DefaultValue Docker docker,
         @DefaultValue Git git,
         List<String> allowedCapabilities,
+        List<String> adminUsers,
         @DefaultValue Auth auth) {
 
     /** What runs inside a session's container. */

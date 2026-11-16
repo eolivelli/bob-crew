@@ -348,6 +348,7 @@ Set as environment variables, or as the Spring properties in
 | `BOBCREW_DEFAULT_IMAGE` | `bobcrew/bob-base:latest` | Image for sessions whose role names none |
 | `BOBCREW_ALLOWED_IMAGES` | `bobcrew/*` | Images a session may name, comma separated; `*` matches anything. The default image is always allowed |
 | `BOBCREW_DOCKER_NETWORK` | `bobcrew` | The sessions' Docker network, created if missing ([Security](#security)) |
+| `BOBCREW_ADMIN_USERS` | none | Users (token subjects, comma separated) who may see, use, share and close every session |
 | `BOBCREW_MAX_SESSIONS_PER_USER` | `4` | Most open sessions one user may have (`0`: only `bobcrew.max-sessions` applies) |
 | `BOBCREW_INSTANCE_ID` | `default` | Labels this server's containers; servers sharing a Docker daemon need different ids |
 | `BOBCREW_ALLOWED_CAPABILITIES` | none | [Capabilities](#capabilities-docker-and-virtual-machines) sessions may ask for: `docker`, `libvirt`, comma separated (their users can become root on the server) |
@@ -386,8 +387,13 @@ Notes on Bob:
   needs the secret file, so it is done on the server machine with `issue-token`. To revoke a
   token, add its `jti` to the revocation file (it is re-read when it changes); to revoke all,
   replace the secret and restart.
-- **Users and sessions**: the session records its creator as owner. For now every valid token can
-  see and use every session; prompts and permission answers record who made them.
+- **Users and sessions**: a session belongs to the user who created it, and nobody else can see it (it
+  answers 404) until its owner shares it with them by name (**Share** in the UI, `PUT
+  /sessions/{id}/sharing` in the API). Users it is shared with can do everything with it except close it and
+  change who it is shared with; that includes prompting the agent, answering its permission requests and
+  having it reveal the secrets the session was given, so share only with people who may have those. When a
+  sharing is withdrawn, that user's event stream ends at once. Users named in `BOBCREW_ADMIN_USERS` may do
+  everything with every session. Prompts, permission answers and sharing changes record who made them.
 - **Isolation**: each session is a container with no host directories, no host environment, a
   non-root user, no capabilities and resource limits. The workspace, `/opt/workspace`, lives and dies
   with the container. Sessions can open outgoing connections (the agent needs to reach its model API) but not
@@ -408,7 +414,7 @@ Notes on Bob:
 - **Environment variables**: a client may set at most 32, with plain names; `BOB_API_KEY`,
   `BOBSHELL_API_KEY`, `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `HOSTNAME`, `BOBCREW_*` and `LD_*` are refused.
   Their values are never logged or returned (only the names are logged). Anyone who can use a session
-  can ask its agent for them, so a role should pass only what every user of the server may see.
+  (its owner, the users it is shared with, admins) can ask its agent for them.
 - **File downloads**: the path must stay inside `/opt/workspace`, and only regular files are served, so
   a symbolic link cannot lead elsewhere in the container.
 - **File uploads**: the path must stay inside `/opt/workspace`; the file is written by the session's
@@ -430,11 +436,12 @@ All under `/api`, with `Authorization: Bearer <token>`.
 
 | Request | Does |
 |---|---|
-| `GET /me` | The token's user (`user`), the capabilities sessions may ask for (`capabilities`), and the caps on resources (`maxMemoryBytes`, `maxCpus`; null for none) |
-| `GET /sessions` | All sessions |
+| `GET /me` | The token's user (`user`), whether they are an admin (`admin`), the capabilities sessions may ask for (`capabilities`), and the caps on resources (`maxMemoryBytes`, `maxCpus`; null for none) |
+| `GET /sessions` | The sessions the caller may use: their own, those shared with them (all of them for an admin) |
 | `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). 400 if the image is not on the server, a variable is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the server's cap; 403 for a capability the server does not allow |
-| `GET /sessions/{id}` | One session: `id`, `owner`, `title`, `image`, `containerId`, `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
-| `DELETE /sessions/{id}` | Closes it and removes its container |
+| `GET /sessions/{id}` | One session: `id`, `owner`, `sharedWith`, `title`, `image`, `containerId`, `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
+| `DELETE /sessions/{id}` | Closes it and removes its container. Owner or admin only (403 for users it is shared with) |
+| `PUT /sessions/{id}/sharing` `{"users": ["bob", "carol"]}` | Shares the session with exactly these users (`[]`: nobody else), and records a `shared` event. Owner or admin only (403 for users it is shared with); at most 50 names |
 | `GET /sessions/{id}/file?path=<path>` | Downloads a regular file from the session's workspace; `path` is relative to `/opt/workspace` or absolute inside it, `file://` allowed (403 if downloads are disabled) |
 | `PUT /sessions/{id}/files?path=<path>` (the file as the body) | Writes a file into the workspace, creating directories and replacing a file there; `path` as for downloads. Answers 201 `{"path", "size"}`; 400 for a path outside the workspace, a link or a directory, 413 if too large, 403 if uploads are disabled |
 | `GET /sessions/{id}/metrics` | A snapshot of the container: `state`, `startedAt`, `uptimeSeconds`, `cpuPercent` (100 = one core), `memoryUsageBytes`, `memoryLimitBytes`, `pids`, `networkRxBytes`, `networkTxBytes`, `blockReadBytes`, `blockWriteBytes`. Docker samples for a second or two |
@@ -455,7 +462,8 @@ bodies are limited to 1 MB.
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,
-`permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here; `data.workspaceWiped` says whether the files went too), `file_uploaded` (`user` uploaded `data.path`, `data.size` bytes), `repository_cloned` (`data.url`, `data.branch`, `data.path`). The server keeps the last 5000 events of a
+`permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here; `data.workspaceWiped` says whether the files went too), `file_uploaded` (`user` uploaded `data.path`, `data.size` bytes), `repository_cloned` (`data.url`, `data.branch`, `data.path`), `shared` (`user` shared the session with
+`data.users`, the whole new list). The server keeps the last 5000 events of a
 session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss nothing.
 
 ## Not in this version
@@ -463,7 +471,7 @@ session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss no
 One process on one machine, by design. A later version can split it into workers (which own the
 agent containers), stateless coordinators and a small metadata store; `SessionManager` is the seam
 for that. Also not done yet: per-user API keys, cloning over ssh, re-cloning after a wipe,
-restricting sessions to their owner, resuming a session after a restart, workspaces that outlive their
+resuming a session after a restart, workspaces that outlive their
 session or are shared between sessions, pulling images, per-session network policies, metrics history,
 capabilities without a privileged container (with a runtime such as Sysbox), capabilities allowed per user.
 
