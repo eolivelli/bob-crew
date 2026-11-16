@@ -8,7 +8,8 @@ const $ = (id) => document.getElementById(id);
 const state = {
   user: '',             // who this UI is signed in as
   servers: [],          // list of configured servers [{name, url}]
-  roles: [],            // available roles [{id, name, description}]
+  roles: [],            // available roles [{id, name, description, image, env}]
+  metricsTimer: null,   // refreshes the metrics panel while it is open
   sessions: [],
   current: null,        // id of the selected session
   source: null,         // its EventSource
@@ -32,7 +33,8 @@ function sessionApi(subPath) {
   return `/sessions/${encodeURIComponent(state.current)}${subPath || ''}`;
 }
 
-async function api(method, path, body) {
+// Returns the response; throws with the server's message when it is not a success.
+async function call(method, path, body) {
   const response = await fetch('/api' + path, {
     method,
     headers: { 'X-BobCrew': '1', ...(body ? { 'Content-Type': 'application/json' } : {}) },
@@ -46,6 +48,11 @@ async function api(method, path, body) {
     } catch (e) { /* not JSON */ }
     throw new Error(message);
   }
+  return response;
+}
+
+async function api(method, path, body) {
+  const response = await call(method, path, body);
   return response.status === 204 || response.status === 202 ? null : response.json();
 }
 
@@ -98,7 +105,8 @@ async function refreshRoles() {
   dropdown.replaceChildren(none, ...state.roles.map((role) => {
     const option = el('option', '', role.name);
     option.value = role.id;
-    option.title = role.description;
+    option.title = [role.description, role.image ? 'image ' + role.image : '',
+      role.env && role.env.length ? 'env ' + role.env.join(', ') : ''].filter(Boolean).join(' · ');
     return option;
   }));
   if (state.roles.some((role) => role.id === prev)) dropdown.value = prev;
@@ -141,7 +149,7 @@ async function refreshSessions() {
       const isSelected = session.id === state.current || (session.server && `${session.server}:${session.id}` === state.current);
       const item = el('li', isSelected ? 'selected' : '');
       item.append(el('span', 'name', session.title),
-        el('span', 'sub', `${session.status.toLowerCase()} · ${session.owner} · ${session.workspace}`));
+        el('span', 'sub', `${session.status.toLowerCase()} · ${session.owner} · ${session.image}`));
       item.addEventListener('click', () => select(session.id, session.server));
       list.append(item);
     }
@@ -150,25 +158,13 @@ async function refreshSessions() {
   if (current) showHeader(current);
 }
 
-async function refreshWorkspaces() {
-  const server = $('new-server').value;
-  try {
-    const path = server ? `/servers/${encodeURIComponent(server)}/workspaces` : '/workspaces';
-    const names = await api('GET', path);
-    $('workspaces').replaceChildren(...names.map((name) => {
-      const option = el('option');
-      option.value = name;
-      return option;
-    }));
-  } catch (e) { /* the list is only a convenience */ }
-}
-
 function showHeader(session) {
   $('session-header').hidden = false;
   $('session-title').textContent = session.title;
   const serverInfo = session.server ? ` · server ${session.server}` : '';
   $('session-meta').textContent =
-    `${session.agent || 'agent'}${serverInfo} · workspace ${session.workspace} · owner ${session.owner}`;
+    `${session.agent || 'agent'}${serverInfo} · image ${session.image}`
+    + `${session.containerId ? ' · container ' + session.containerId : ''} · owner ${session.owner}`;
   setStatus(session.status);
   const select = $('session-mode');
   select.replaceChildren(...(session.modes || []).map((mode) => {
@@ -189,6 +185,7 @@ function setStatus(status) {
   $('prompt-form').querySelector('button').disabled = status !== 'IDLE';
   $('cancel').disabled = status !== 'RUNNING';
   $('clear').disabled = status !== 'IDLE';
+  $('metrics-toggle').disabled = status === 'CLOSED';
   $('session-mode').disabled = !open;
 }
 
@@ -196,6 +193,7 @@ function setStatus(status) {
 
 function select(id, serverName) {
   hideRoles();
+  hideMetrics();
   if (state.source) state.source.close();
   state.current = id;
   const session = state.sessions.find((s) => s.id === id && (!serverName || s.server === serverName))
@@ -427,9 +425,15 @@ $('new-session').addEventListener('submit', async (submit) => {
     // fetched first, so that a vanished role stops us before a session is created
     const role = roleId ? await api('GET', `/roles/${encodeURIComponent(roleId)}`) : null;
     const createPath = server ? `/servers/${encodeURIComponent(server)}/sessions` : '/sessions';
-    const session = await api('POST', createPath,
-      { workspace: $('new-workspace').value.trim(), title: $('new-title').value.trim() || (role ? role.name : '') });
+    // the UI app turns the role into the image and environment variables; their values never come here
+    const response = await call('POST', createPath,
+      { title: $('new-title').value.trim() || (role ? role.name : ''), ...(role ? { role: role.id } : {}) });
+    const session = await response.json();
     if (server) session.server = server;
+    const missing = response.headers.get('X-BobCrew-Missing-Env');
+    if (missing) {
+      notify(`These environment variables of the role are not set where the UI runs, so the session has none: ${missing}`);
+    }
     $('new-title').value = '';
     state.sessions.unshift(session);
     if (role) {
@@ -441,7 +445,6 @@ $('new-session').addEventListener('submit', async (submit) => {
       }
     }
     select(session.id, server);
-    refreshWorkspaces();
   } catch (e) {
     notify(e.message);
   } finally {
@@ -496,17 +499,104 @@ $('export').addEventListener('click', async () => {
   }
 });
 
-$('clear').addEventListener('click', async () => {
-  const session = currentSession();
-  if (!session) return;
-  if (!window.confirm(`Clear this session? Everything in the workspace "${session.workspace}" will be deleted `
-      + 'and the conversation will start over. This cannot be undone. The session stays open.')) return;
+$('clear').addEventListener('click', () => {
+  if (!currentSession()) return;
+  const dialog = $('clear-dialog');
+  dialog.returnValue = 'cancel';
+  dialog.showModal();
+});
+
+$('clear-dialog').addEventListener('close', async () => {
+  const choice = $('clear-dialog').returnValue;
+  if (choice !== 'keep' && choice !== 'wipe') return;
   try {
-    await api('POST', sessionApi('/clear'));
+    await api('POST', sessionApi('/clear'), { wipeWorkspace: choice === 'wipe' });
     refreshSessions(); // the agent's modes start over
   } catch (e) {
     notify(e.message);
   }
+});
+
+// ---- container metrics ----------------------------------------------------
+
+function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined) return 'n/a';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined) return 'n/a';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${s}s` : `${s}s`;
+}
+
+function showMetrics(metrics) {
+  const memory = metrics.memoryUsageBytes !== null && metrics.memoryUsageBytes !== undefined
+    ? `${formatBytes(metrics.memoryUsageBytes)} of ${formatBytes(metrics.memoryLimitBytes)}`
+      + (metrics.memoryLimitBytes ? ` (${(100 * metrics.memoryUsageBytes / metrics.memoryLimitBytes).toFixed(1)}%)` : '')
+    : 'n/a';
+  const rows = [
+    ['State', metrics.state || 'n/a'],
+    ['Uptime', formatDuration(metrics.uptimeSeconds)],
+    ['CPU', metrics.cpuPercent === null || metrics.cpuPercent === undefined ? 'n/a' : `${metrics.cpuPercent}%`],
+    ['Memory', memory],
+    ['Processes', metrics.pids === null || metrics.pids === undefined ? 'n/a' : String(metrics.pids)],
+    ['Network in / out', `${formatBytes(metrics.networkRxBytes)} / ${formatBytes(metrics.networkTxBytes)}`],
+    ['Disk read / write', `${formatBytes(metrics.blockReadBytes)} / ${formatBytes(metrics.blockWriteBytes)}`],
+    ['Container', `${metrics.containerId || ''} · ${metrics.image || ''}`],
+  ];
+  $('metrics-list').replaceChildren(...rows.flatMap(([name, value]) => [el('dt', '', name), el('dd', '', value)]));
+  $('metrics-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+}
+
+async function loadMetrics() {
+  const sessionPath = sessionApi('/metrics');
+  try {
+    const metrics = await api('GET', sessionPath);
+    // the user may have moved on while Docker was sampling
+    if (!$('metrics').hidden && sessionApi('/metrics') === sessionPath) showMetrics(metrics);
+  } catch (e) {
+    $('metrics-updated').textContent = 'unavailable: ' + e.message;
+  }
+}
+
+// Docker samples for a second or two, so every 5 s is plenty; nothing is fetched while the panel is closed.
+function scheduleMetrics() {
+  clearTimeout(state.metricsTimer);
+  state.metricsTimer = setTimeout(async () => {
+    if ($('metrics').hidden) return;
+    await loadMetrics();
+    if (!$('metrics').hidden) scheduleMetrics();
+  }, 5000);
+}
+
+function hideMetrics() {
+  clearTimeout(state.metricsTimer);
+  state.metricsTimer = null;
+  $('metrics').hidden = true;
+  $('metrics-toggle').classList.remove('active');
+}
+
+$('metrics-toggle').addEventListener('click', async () => {
+  if (!$('metrics').hidden) {
+    hideMetrics();
+    return;
+  }
+  $('metrics').hidden = false;
+  $('metrics-toggle').classList.add('active');
+  $('metrics-list').replaceChildren();
+  $('metrics-updated').textContent = 'sampling…';
+  await loadMetrics();
+  scheduleMetrics();
 });
 
 $('close').addEventListener('click', async () => {
@@ -514,6 +604,7 @@ $('close').addEventListener('click', async () => {
   try {
     await api('DELETE', sessionApi());
     if (state.source) state.source.close();
+    hideMetrics();
     state.current = null;
     history.replaceState(null, '', '#');
     $('session-header').hidden = true;
@@ -525,10 +616,8 @@ $('close').addEventListener('click', async () => {
   }
 });
 
-$('new-server').addEventListener('change', () => refreshWorkspaces());
-
 // manifests can be added while the page is open; look again when the user starts a new session
-$('new-workspace').addEventListener('focus', () => refreshRoles());
+$('new-title').addEventListener('focus', () => refreshRoles());
 
 // ---- roles view (read-only) ----------------------------------------------
 
@@ -538,6 +627,7 @@ function hideRoles() {
 }
 
 async function showRoles() {
+  hideMetrics();
   document.querySelector('main').classList.add('showing-roles');
   $('roles-view').hidden = false;
   $('role-name').textContent = '';
@@ -564,7 +654,10 @@ async function showRole(id, item) {
   try {
     const role = await api('GET', `/roles/${encodeURIComponent(id)}`);
     $('role-name').textContent = `${role.name} (${role.id})`;
-    $('role-description').textContent = role.description;
+    $('role-description').textContent = [role.description,
+      `Image: ${role.image || "the server's default"}`,
+      `Environment passed from this computer: ${role.env && role.env.length ? role.env.join(', ') : 'none'}`]
+      .filter(Boolean).join(' · ');
     $('role-manifest').textContent = role.manifest;
   } catch (e) {
     notify(e.message);
@@ -583,7 +676,6 @@ $('hide-roles').addEventListener('click', () => hideRoles());
   } catch (e) {
     notify(e.message);
   }
-  refreshWorkspaces();
   refreshRoles();
   await refreshSessions();
   const linked = location.hash.slice(1);

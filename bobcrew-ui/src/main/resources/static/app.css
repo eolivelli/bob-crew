@@ -165,3 +165,38 @@ main.showing-roles > :not(#roles-view):not(#notice) { display: none; }
   body { flex-direction: column; }
   #sidebar { width: auto; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--border); }
 }
+
+/* container metrics, under the session header */
+#metrics {
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  padding: 8px 16px;
+}
+#metrics header { display: flex; align-items: baseline; gap: 12px; }
+#metrics h3 { margin: 0; font-size: 14px; }
+#metrics-updated { color: var(--muted); font-size: 12px; }
+#metrics-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 16px;
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+#metrics-list dt { color: var(--muted); }
+#metrics-list dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+button.active { border-color: var(--accent); color: var(--accent); }
+
+/* the Clear dialog */
+#clear-dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-width: 480px;
+}
+#clear-dialog::backdrop { background: rgb(0 0 0 / 40%); }
+#clear-dialog .hint { color: var(--muted); font-size: 13px; }
+#clear-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
+#clear-dialog button[value=keep] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+#clear-dialog button.danger { color: var(--bad); }
+.dialog-buttons { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }

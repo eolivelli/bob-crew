@@ -1,8 +1,6 @@
 package bobcrew.server;
 
-import java.nio.file.Path;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -17,8 +15,6 @@ import java.util.stream.Collectors;
 
 import com.agentclientprotocol.sdk.client.AcpClient;
 import com.agentclientprotocol.sdk.client.AcpSyncClient;
-import com.agentclientprotocol.sdk.client.transport.AgentParameters;
-import com.agentclientprotocol.sdk.client.transport.StdioAcpClientTransport;
 import com.agentclientprotocol.sdk.error.AcpConnectionException;
 import com.agentclientprotocol.sdk.spec.AcpSchema;
 import org.slf4j.Logger;
@@ -26,28 +22,28 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 
 /**
- * One agent process and the ACP session running in it: starts the process, sends prompts,
+ * One agent container and the ACP session running in it: starts the container, sends prompts,
  * records everything the agent reports in the session's {@link EventLog}, and holds the agent's
  * permission requests until a user answers them.
  */
 final class AgentSession {
 
     enum Status {
-        /** The agent process is being started. */
+        /** The agent's container is being started. */
         STARTING,
         /** Ready for a prompt. */
         IDLE,
         /** A prompt turn is in progress. */
         RUNNING,
-        /** The agent process ended by itself or could not be started. */
+        /** The agent's container ended by itself or could not be started. */
         FAILED,
         /** Closed on request. */
         CLOSED
     }
 
     /** What clients see of a session. */
-    record Info(String id, String owner, String workspace, String title, Status status, String agent,
-            String currentMode, List<Mode> modes, Instant createdAt, Instant updatedAt, long lastSeq) {
+    record Info(String id, String owner, String title, String image, String containerId, Status status,
+            String agent, String currentMode, List<Mode> modes, Instant createdAt, Instant updatedAt, long lastSeq) {
     }
 
     record Mode(String id, String name) {
@@ -64,18 +60,15 @@ final class AgentSession {
 
     private static final Logger agentStderr = LoggerFactory.getLogger("bobcrew.agent.stderr");
 
-    /** Serializes process starts, so the child process each one creates can be told apart. */
-    private static final Object START_LOCK = new Object();
-
     private final String id;
 
     private final String owner;
 
     private final String title;
 
-    private final Path workspace;
+    private final DockerRuntime.ContainerSpec spec;
 
-    private final String workspaceName;
+    private final DockerRuntime docker;
 
     private final BobCrewProperties properties;
 
@@ -91,7 +84,7 @@ final class AgentSession {
 
     private volatile AcpSyncClient client;
 
-    private volatile ProcessHandle process;
+    private volatile String containerId;
 
     private volatile String acpSessionId;
 
@@ -103,13 +96,12 @@ final class AgentSession {
 
     private volatile boolean firstPrompt = true;
 
-    AgentSession(String id, String owner, String title, Path workspace, String workspaceName,
-            BobCrewProperties properties) {
-        this.id = id;
-        this.owner = owner;
+    AgentSession(DockerRuntime.ContainerSpec spec, String title, DockerRuntime docker, BobCrewProperties properties) {
+        this.id = spec.sessionId();
+        this.owner = spec.owner();
         this.title = title;
-        this.workspace = workspace;
-        this.workspaceName = workspaceName;
+        this.spec = spec;
+        this.docker = docker;
         this.properties = properties;
         this.events = new EventLog(properties.eventBufferSize());
     }
@@ -126,8 +118,8 @@ final class AgentSession {
         return status;
     }
 
-    Path workspace() {
-        return workspace;
+    String image() {
+        return spec.image();
     }
 
     Instant updatedAt() {
@@ -139,69 +131,53 @@ final class AgentSession {
     }
 
     Info info() {
-        return new Info(id, owner, workspaceName, title, status, agentName, currentMode, modes, createdAt, updatedAt,
-                events.lastSeq());
+        return new Info(id, owner, title, spec.image(), DockerRuntime.shortId(containerId), status, agentName,
+                currentMode, modes, createdAt, updatedAt, events.lastSeq());
     }
 
     /**
-     * Starts the agent process, initializes ACP and creates the agent's session.
-     * @throws ApiException with 502 if the agent cannot be started or refuses the session
+     * Creates and starts the agent's container, initializes ACP and creates the agent's session.
+     * @throws ApiException with 400 if the image is not on the server, 502 if the agent cannot be started or
+     * refuses the session
      */
     void start() {
-        BobCrewProperties.Agent agent = properties.agent();
-        AgentParameters.Builder parameters = AgentParameters.builder(agent.binary())
-            .args(agent.arguments())
-            .inheritEnvironment(agent.inheritEnvironment());
-        if (agent.apiKey() != null && !agent.apiKey().isBlank()) {
-            parameters.addEnvVar("BOB_API_KEY", agent.apiKey());
-            parameters.addEnvVar("BOBSHELL_API_KEY", agent.apiKey());
-        }
-        StdioAcpClientTransport transport = new StdioAcpClientTransport(parameters.build());
-        transport.setStdErrorHandler(line -> agentStderr.debug("[{}] {}", id, line));
         try {
-            AcpSyncClient newClient;
-            AcpSchema.InitializeResponse initialized;
-            synchronized (START_LOCK) {
-                // the SDK does not expose the process it starts: it is the child that appears here
-                Set<Long> before = childPids();
-                newClient = AcpClient.sync(transport)
-                    .requestTimeout(properties.requestTimeout())
-                    .promptTimeout(properties.promptTimeout())
-                    .clientInfo(new AcpSchema.Implementation("bob-crew", "0.1.0", "bob-crew"))
-                    // no file system or terminal capabilities: the agent works with its own tools
-                    .clientCapabilities(new AcpSchema.ClientCapabilities())
-                    .sessionUpdateHandler(this::onUpdate)
-                    .requestPermissionHandler(this::onPermissionRequest)
-                    .build();
-                this.client = newClient;
-                initialized = newClient.initialize();
-                this.process = ProcessHandle.current()
-                    .children()
-                    .filter(child -> !before.contains(child.pid()))
-                    .findFirst()
-                    .orElse(null);
-            }
-            if (this.process == null) {
-                log.warn("Session {}: could not identify the agent process; its exit will not be noticed", id);
-            }
+            String created = docker.create(spec);
+            this.containerId = created;
+            ContainerAcpTransport transport = new ContainerAcpTransport(docker, created,
+                    line -> agentStderr.debug("[{}] {}", id, line), reason -> onAgentExit());
+            AcpSyncClient newClient = AcpClient.sync(transport)
+                .requestTimeout(properties.requestTimeout())
+                .promptTimeout(properties.promptTimeout())
+                .clientInfo(new AcpSchema.Implementation("bob-crew", "0.1.0", "bob-crew"))
+                // no file system or terminal capabilities: the agent works with its own tools
+                .clientCapabilities(new AcpSchema.ClientCapabilities())
+                .sessionUpdateHandler(this::onUpdate)
+                .requestPermissionHandler(this::onPermissionRequest)
+                .build();
+            this.client = newClient;
+            AcpSchema.InitializeResponse initialized = newClient.initialize();
             if (initialized.agentInfo() != null) {
                 AcpSchema.Implementation info = initialized.agentInfo();
                 this.agentName = (info.title() != null ? info.title() : info.name()) + " " + info.version();
             }
-            AcpSchema.NewSessionResponse created = newClient
-                .newSession(new AcpSchema.NewSessionRequest(workspace.toString(), List.of()));
-            useSession(created);
+            useSession(newClient.newSession(new AcpSchema.NewSessionRequest(DockerRuntime.WORKSPACE, List.of())));
+        } catch (ApiException e) {
+            setStatus(Status.FAILED);
+            shutdown();
+            throw e;
         } catch (RuntimeException e) {
             log.warn("Session {}: the agent could not be started: {}", id, e.toString());
             setStatus(Status.FAILED);
             shutdown();
             throw new ApiException(HttpStatus.BAD_GATEWAY, "The agent could not start a session: " + rootMessage(e));
         }
-        ProcessHandle handle = this.process;
-        if (handle != null) {
-            handle.onExit().thenRun(this::onProcessExit);
+        synchronized (this) {
+            // the container may already have died while starting
+            if (status == Status.STARTING) {
+                setStatus(Status.IDLE);
+            }
         }
-        setStatus(Status.IDLE);
     }
 
     private void useSession(AcpSchema.NewSessionResponse created) {
@@ -217,13 +193,14 @@ final class AgentSession {
     }
 
     /**
-     * Starts the conversation over without ending the session: runs {@code wipeWorkspace}, opens a
-     * fresh ACP session in the same agent process, forgets the recorded events and records a
+     * Starts the conversation over without ending the session: optionally deletes the workspace's files,
+     * opens a fresh ACP session in the same agent, forgets the recorded events and records a
      * {@link UiEvent#CLEARED} event. The session counts as starting meanwhile, so no prompt gets in.
-     * If it fails, the session is as it was (except for what {@code wipeWorkspace} already removed).
+     * If it fails, the session is as it was (except for what the wipe already removed).
+     * @param wipeWorkspace whether to delete everything in the workspace; false keeps, say, a cloned repository
      * @throws ApiException with 409 if the session is not idle, 502 if the agent refuses a new session
      */
-    Info clear(String user, Runnable wipeWorkspace) {
+    Info clear(String user, boolean wipeWorkspace) {
         synchronized (this) {
             if (status != Status.IDLE) {
                 throw new ApiException(HttpStatus.CONFLICT, "The session is " + status.name().toLowerCase()
@@ -233,10 +210,12 @@ final class AgentSession {
             setStatus(Status.STARTING);
         }
         try {
-            wipeWorkspace.run();
+            if (wipeWorkspace) {
+                docker.wipeWorkspace(containerId);
+            }
             AcpSchema.NewSessionResponse created;
             try {
-                created = client.newSession(new AcpSchema.NewSessionRequest(workspace.toString(), List.of()));
+                created = client.newSession(new AcpSchema.NewSessionRequest(DockerRuntime.WORKSPACE, List.of()));
             } catch (RuntimeException e) {
                 log.warn("Session {}: the agent refused a new session: {}", id, e.toString());
                 throw new ApiException(HttpStatus.BAD_GATEWAY,
@@ -244,7 +223,7 @@ final class AgentSession {
             }
             useSession(created);
             events.discard();
-            events.append(UiEvent.CLEARED, user, Map.of());
+            events.append(UiEvent.CLEARED, user, Map.of("workspaceWiped", wipeWorkspace));
         } finally {
             synchronized (this) {
                 if (status == Status.STARTING) {
@@ -278,7 +257,7 @@ final class AgentSession {
                 events.append(UiEvent.TURN_END, null, Map.of("stopReason", response.stopReason()));
             } catch (AcpConnectionException e) {
                 // the connection to the agent is gone, so the session is too
-                onProcessExit();
+                onAgentExit();
             } catch (RuntimeException e) {
                 log.warn("Session {}: prompt failed: {}", id, e.toString());
                 events.append(UiEvent.ERROR, null, Map.of("message", "The prompt failed: " + rootMessage(e)));
@@ -310,7 +289,7 @@ final class AgentSession {
         if (isFirst && properties.fileDownloadsEnabled()) {
             return List.of(
                 new AcpSchema.TextContent(
-                    "[Instructions: You can share files from the workspace with the user by replying with a file URL (for example file:///path/to/file or file://relative/path). The user interface will make it clickable for download.]\n\n"
+                    "[Instructions: You can share files from the workspace with the user by replying with a file URL (for example file:///opt/workspace/path/to/file or file://relative/path). The user interface will make it clickable for download.]\n\n"
                     + text)
             );
         }
@@ -348,7 +327,29 @@ final class AgentSession {
         }
     }
 
-    /** Closes the session and ends its agent process. */
+    /** A snapshot of the container's resource use. */
+    ContainerMetrics metrics() {
+        String current = containerId;
+        if (current == null || status == Status.CLOSED) {
+            throw new ApiException(HttpStatus.CONFLICT, "The session has no container");
+        }
+        return docker.metrics(current);
+    }
+
+    /**
+     * Opens a regular file of the session's workspace.
+     * @param path a client path; it goes through {@link ContainerPaths}
+     */
+    DockerRuntime.ContainerFile readFile(String path) {
+        String target = ContainerPaths.resolve(path);
+        String current = containerId;
+        if (current == null || status == Status.CLOSED) {
+            throw new ApiException(HttpStatus.CONFLICT, "The session has no container");
+        }
+        return docker.readFile(current, target);
+    }
+
+    /** Closes the session and removes its container. */
     void close() {
         synchronized (this) {
             if (status == Status.CLOSED) {
@@ -361,13 +362,6 @@ final class AgentSession {
 
     private void shutdown() {
         cancelPendingPermissions();
-        ProcessHandle handle = this.process;
-        // collected before the agent exits: afterwards its children are no longer reachable from it
-        List<ProcessHandle> tree = new ArrayList<>();
-        if (handle != null) {
-            handle.descendants().forEach(tree::add);
-            tree.add(handle);
-        }
         AcpSyncClient current = this.client;
         if (current != null) {
             try {
@@ -376,21 +370,20 @@ final class AgentSession {
                 log.debug("Session {}: closing the client failed: {}", id, e.toString());
             }
         }
-        for (ProcessHandle member : tree) {
-            if (member.isAlive()) {
-                member.destroyForcibly();
-            }
+        String container = this.containerId;
+        if (container != null) {
+            docker.remove(container);
         }
         events.close();
     }
 
-    private void onProcessExit() {
+    private void onAgentExit() {
         synchronized (this) {
             if (status == Status.CLOSED || status == Status.FAILED) {
                 return;
             }
-            log.warn("Session {}: the agent process ended unexpectedly", id);
-            events.append(UiEvent.ERROR, null, Map.of("message", "The agent process ended unexpectedly"));
+            log.warn("Session {}: the agent's container ended unexpectedly", id);
+            events.append(UiEvent.ERROR, null, Map.of("message", "The agent ended unexpectedly"));
             setStatus(Status.FAILED);
         }
         cancelPendingPermissions();
@@ -476,10 +469,6 @@ final class AgentSession {
 
     private void touch() {
         this.updatedAt = Instant.now();
-    }
-
-    private static Set<Long> childPids() {
-        return ProcessHandle.current().children().map(ProcessHandle::pid).collect(Collectors.toSet());
     }
 
     private static String rootMessage(Throwable failure) {

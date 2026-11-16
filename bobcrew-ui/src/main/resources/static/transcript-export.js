@@ -216,7 +216,7 @@ function buildTranscriptHtml(session, events, context) {
   const items = transcriptItems(events);
   const meta = [
     session.agent || 'agent',
-    'workspace ' + session.workspace,
+    'image ' + session.image,
     'owner ' + session.owner,
     'session ' + session.id,
   ].join(' · ');

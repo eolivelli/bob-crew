@@ -22,11 +22,12 @@ const events = [
   ev(13, 'error', { message: evil }),
   ev(14, 'status', { status: 'IDLE' }),
 ];
-const session = { id: 'abc', title: 'My <b>session</b> / x', agent: 'Bob 2.1.0', workspace: 'demo', owner: 'alice' };
+const session = { id: 'abc', title: 'My <b>session</b> / x', agent: 'Bob 2.1.0', image: 'bobcrew/bob-<base>:latest', owner: 'alice' };
 const html = ctx.buildTranscriptHtml(session, events, { exportedAt: new Date('2026-11-13T11:00:00Z'), exportedBy: 'me' });
 assert(!/<script|<img|<b>|<\/b>|onclick="/.test(html.replace(/<meta[^>]*>/g, '')), 'unescaped markup');
 assert(html.includes('&lt;script&gt;alert(1)'), 'escaped text present');
 assert(html.includes('Content-Security-Policy'));
+assert(html.includes('image bobcrew/bob-&lt;base&gt;:latest'), 'the image is shown, escaped');
 assert.strictEqual((html.match(/class="msg thought"/g) || []).length, 1, 'thought chunks merge');
 assert(html.includes('>Hello &lt;script'), 'agent chunks merge');
 assert.strictEqual((html.match(/card plan/g) || []).length, 1, 'one plan card');

@@ -17,10 +17,8 @@
   </header>
   <form id="new-session">
     <select id="new-server" required title="Server"></select>
-    <input id="new-workspace" list="workspaces" placeholder="Workspace directory" required autocomplete="off">
-    <datalist id="workspaces"></datalist>
     <input id="new-title" placeholder="Title (optional)" maxlength="200" autocomplete="off">
-    <select id="new-role" title="Role: the prompt sent first to the new session" hidden></select>
+    <select id="new-role" title="Role: the session's image, environment and first prompt" hidden></select>
     <button type="submit">New session</button>
   </form>
   <button id="show-roles" type="button" title="List the available roles and read their manifests">Roles</button>
@@ -36,13 +34,32 @@
     <div class="controls">
       <span id="session-status" class="badge"></span>
       <select id="session-mode" title="Mode"></select>
+      <button id="metrics-toggle" type="button" title="CPU, memory and I/O of the session's container">Metrics</button>
       <button id="export" type="button" title="Download the whole session as a gzipped HTML file">Export transcript</button>
       <button id="cancel" type="button">Stop</button>
-      <button id="clear" type="button" class="danger" title="Start the conversation over and delete everything in the workspace; the session stays open">Clear</button>
+      <button id="clear" type="button" class="danger" title="Start the conversation over, optionally deleting the workspace's files; the session stays open">Clear</button>
       <button id="close" type="button" class="danger">Close session</button>
     </div>
   </header>
+  <section id="metrics" hidden>
+    <header>
+      <h3>Container</h3>
+      <span id="metrics-updated"></span>
+    </header>
+    <dl id="metrics-list"></dl>
+  </section>
   <div id="notice" hidden></div>
+  <dialog id="clear-dialog">
+    <form method="dialog">
+      <p>Start the conversation over? The session stays open, in the same container.</p>
+      <p class="hint">Keeping the files is useful when the workspace holds, say, a cloned repository.</p>
+      <div class="dialog-buttons">
+        <button value="keep" type="submit">Clear conversation, keep files</button>
+        <button value="wipe" class="danger" type="submit">Clear and delete workspace files</button>
+        <button value="cancel" type="submit" class="plain">Cancel</button>
+      </div>
+    </form>
+  </dialog>
   <section id="roles-view" hidden>
     <header>
       <h2>Roles</h2>

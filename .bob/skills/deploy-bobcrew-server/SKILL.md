@@ -10,7 +10,9 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
 
 - `scripts/deploy-remote.sh [-i key] user@host [--stop]` copies the server, creates certs and a JWT
   secret on the remote, and (re)starts it with nohup under `~/bobcrew` (server.log, server.pid,
-  server.env, certs/, workspaces/). It stops a running server first.
+  server.env, certs/). It stops a running server first.
+- `scripts/push-images.sh [-i key] user@host image... | --all` copies session images to the remote
+  Docker over ssh (the server never pulls images). Build them first with `scripts/build-images.sh`.
 - `scripts/connect-ui.sh [-i key] user@host` runs the UI locally against it.
 
 ## 1. Find the target
@@ -19,7 +21,9 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
    (gitignored; it changes with every new cluster, so re-read it): `ssh user`, `ssh key path`,
    `public hostname`, `private ip`. `.lab/REMOTE_WORKER_SETUP.md` describes provisioning the machine.
 2. Check what the machine already has before installing anything:
-   `ssh -i <key> user@host 'java -version; which bob openssl'`. Needs Java 21+, `openssl`, `bob`.
+   `ssh -i <key> user@host 'java -version; which openssl; docker info --format {{.ServerVersion}}'`.
+   Needs Java 21+, `openssl`, and Docker usable by that user (in the `docker` group). Bob itself is not
+   needed on the machine: it is in the session images.
    If something is missing, follow `.lab/REMOTE_WORKER_SETUP.md` (it is a checklist; run the steps
    non-interactively; gh login and the API key are manual).
 3. Never print tokens, `BOB_API_KEY`, `jwt.secret` or `server.env`. Redact when showing config files.
@@ -27,6 +31,9 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
 ## 2. Build and deploy
 
 1. Build with JDK 21: `source ~/.sdkman/bin/sdkman-init.sh; sdk env; mvn -q install -DskipTests`.
+   Build the images if they are missing locally (`docker image ls 'bobcrew/*'`):
+   `scripts/build-images.sh`, then copy them: `scripts/push-images.sh -i <key> <user>@<host> --all`
+   (it skips images the remote already has; the first copy is about 1 GB per image, compressed).
 2. `BOB_API_KEY` is taken from the local environment and written to the remote `server.env` (mode 600).
    Check that it is set locally (`${BOB_API_KEY:+yes}`, without echoing it). If not, tell the user.
    An existing remote `server.env` is kept when it is not set.
@@ -34,8 +41,8 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
    only their private address on the interface, so pass it:
    `BOBCREW_REMOTE_BIND=<private ip> scripts/deploy-remote.sh -i <key> <user>@<public hostname>`
    Use the public hostname as `host` so the certificate matches what the UI connects to.
-4. The script uses the wider agent settings of `start-server-wide.sh` (`--auto-approve`, `--trust`,
-   inherited environment). If the user has not already chosen this, confirm it before deploying
+4. The script uses the wider agent settings of `start-server-wide.sh` (`--auto-approve`, `--trust`).
+   If the user has not already chosen this, confirm it before deploying
    (`ask_followup_question`): tool calls will then not ask for permission in the UI.
 5. If an older manual deployment exists in `~/bobcrew`, stop it first (`kill $(cat server.pid)`) and
    move the directory away; the script owns `~/bobcrew`.
@@ -48,8 +55,9 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
    (`ssl_verify_result=0`). A timeout means the port is closed in the security group: tell the user,
    and recommend opening it to their IP only, never to the internet.
 3. Optional end-to-end check: `connect-ui.sh` prints a token internally; for a quick API check issue
-   one on the remote with `issue-token --user <name> --ttl 1d`, create a workspace directory under
-   `~/bobcrew/workspaces`, `POST /api/sessions`, `POST .../prompt`, read `.../events`, `DELETE` it.
+   one on the remote with `issue-token --user <name> --ttl 1d`, `POST /api/sessions` with `{}`,
+   `POST .../prompt`, read `.../events`, `GET .../metrics`, `DELETE` it. `docker ps --filter
+   label=bobcrew.managed` on the remote shows the session's container while it is open.
 
 ## 4. Connect the UI
 
@@ -64,5 +72,7 @@ To stop the remote server: `scripts/deploy-remote.sh -i <key> <user>@<host> --st
 - `pgrep -f bobcrew-server` over ssh matches the ssh command itself; use `pgrep -af "java.*bobcrew-server"`
   and filter `pgrep`, or check `server.pid`.
 - The server does not survive a reboot or cluster TTL expiry; redeploy with this skill.
-- Workspaces must exist before creating a session (`POST /api/sessions` answers 400 otherwise).
-- The agent inherits the environment of a remote login shell (`~/.profile`), not `~/.bashrc`.
+- `POST /api/sessions` answers 400 when the image is not on the remote Docker: push it.
+- Agents do not see the remote machine's environment. Variables such as `GH_TOKEN` come from the
+  machine running the UI, listed in the role's `env:`.
+- Containers left by a server killed with -9 are removed when it starts again (label `bobcrew.instance`).

@@ -6,13 +6,14 @@ file covers what you need to change the code safely.
 
 ## What this is
 
-bob-crew runs many IBM Bob Shell sessions on a server. Each session is one `bob acp` child process
-speaking the [Agent Client Protocol](https://agentclientprotocol.com) (newline-delimited JSON-RPC
-2.0 on stdin/stdout). The server puts an HTTPS API in front of them; a small local app serves the
-web UI and forwards API calls with the user's token.
+bob-crew runs many IBM Bob Shell sessions on a server. Each session is one Docker container running
+`bob acp`, which speaks the [Agent Client Protocol](https://agentclientprotocol.com) (newline-delimited
+JSON-RPC 2.0) on the container's stdin/stdout. The server reaches it through the Docker API
+(docker-java), attached to those streams. It puts an HTTPS API in front of the sessions; a small local
+app serves the web UI and forwards API calls with the user's token.
 
 ```
-browser --http 127.0.0.1--> bobcrew-ui --HTTPS + Bearer JWT--> bobcrew-server --stdio--> bob acp
+browser --http 127.0.0.1--> bobcrew-ui --HTTPS + Bearer JWT--> bobcrew-server --Docker attach--> container: bob acp
 ```
 
 ## Build and test
@@ -30,14 +31,18 @@ mvn test -pl bobcrew-server -Dtest=ServerIntegrationTest#aUserAnswersAPermission
 The UI's JavaScript tests (`bobcrew-ui/src/test/js`) run in the same `test` phase through
 exec-maven-plugin, so `node` (18 or newer) must be on the PATH; `-DskipTests` skips them.
 
-Tests never need Bob or an API key: they start `bobcrew-fake-agent` as the agent process. Do not
-add a test that requires the real `bob` binary or network access.
+Tests never need Bob or an API key: the server tests run `bobcrew-fake-agent` in real containers, from
+an image they build once per run (`bobcrew-fake-agent:test`, from
+`bobcrew-server/src/test/docker/fake-agent/Dockerfile` plus `docker/bob-base/bobcrew-entrypoint.sh`).
+They need a Docker daemon and are skipped, not failed, without one (`TestDocker`, a JUnit condition, decides
+before Spring starts). The only network use is pulling the test image's base the first time. Do not add a
+test that requires the real `bob` binary, the `bobcrew/bob-*` images, or other network access.
 
 After changing `bobcrew-fake-agent`, run `mvn install -pl bobcrew-fake-agent` (or build with
-`-am`) before running server tests, because the server tests load it from the local repository.
+`-am`) before running server tests: they copy its `-all` jar from the local repository into the image.
 
-To try a change by hand, follow "Quick start" in the README with the fake agent
-(`BOB_PATH=java`, `BOB_ARGUMENTS=-jar,<path to bobcrew-fake-agent-*-all.jar>`).
+To try a change by hand, follow "Quick start" in the README with the fake agent's image
+(`BOBCREW_DEFAULT_IMAGE=bobcrew-fake-agent:test`, `BOBCREW_AGENT_COMMAND=java,-jar,/opt/fake-agent.jar`).
 
 ## Layout
 
@@ -46,18 +51,26 @@ To try a change by hand, follow "Quick start" in the README with the fake agent
 | `bobcrew-server/` | The service: Spring Boot 4 (Spring MVC, virtual threads), package `bobcrew.server` |
 | `bobcrew-ui/` | Loopback-only UI app, package `bobcrew.ui`; pages in `src/main/resources/static/` |
 | `bobcrew-fake-agent/` | `FakeAcpAgent`: scripted ACP agent, hand-written JSON-RPC, no SDK |
+| `docker/bob-base/` | The default session image (UBI 9, Bob Shell, git, gh, Node, Homebrew) and `bobcrew-entrypoint.sh`, the image/server contract |
+| `docker/bob-java/` | Example image built on bob-base (JDK 21, Maven, Gradle, Ant) |
+| `docker/bob-java-python/` | Development template image (JDK 21, Maven 3.9, Python 3.11); git/GitHub setup comes from bob-base's `profile.d/40-git.sh` |
+| `ui.template/` | Starting `~/.bobcrew/` for UI users (`ui.properties`, `roles/developer.md`), copied by `scripts/init-ui-config.sh`; `RoleRegistryTest` checks the role stays valid |
 | `scripts/gen-dev-certs.sh` | Private CA, server certificate and JWT secret for development |
+| `scripts/build-images.sh`, `scripts/push-images.sh` | Build the images; copy images to another machine's Docker over ssh |
 
 ### Server classes
 
 | Class | Role |
 |---|---|
 | `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager`. |
-| `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limit, idle cleanup, shutdown. |
-| `AgentSession` | One agent process and its ACP session: start, prompt, cancel, mode, permissions, close, crash detection. |
+| `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limit, idle cleanup, shutdown, and the checks on client-supplied environment variables. |
+| `AgentSession` | One agent container and its ACP session: start, prompt, cancel, mode, permissions, clear, metrics, file reads, close, crash detection. |
+| `DockerRuntime` | The only class that talks to Docker: creates containers (hardened, labelled, never pulling), attaches, execs (workspace wipe), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
+| `ContainerAcpTransport` | The SDK's `AcpClientTransport` over a container's attach streams. The one class of ours with Reactor types, because the SDK interface has them. |
+| `ContainerMetrics` | The metrics record (`GET /sessions/{id}/metrics`). |
 | `EventLog` | A session's numbered events with replay; one queue per subscriber. |
 | `UiEvent` | The event record clients receive, and the event type names. |
-| `Workspaces` | Turns a client-supplied workspace name into a directory under the root. The only place that does. |
+| `ContainerPaths` | Turns a client-supplied file path into a path inside `/opt/workspace` of the container. The only place that does. |
 | `SessionAccessPolicy` | Who may use a session. Currently everyone; narrow it here and nowhere else. |
 | `SecurityConfig` | JWT validation (signature, expiry, issuer, audience, subject, revocation list). |
 | `Tokens`, `IssueTokenCommand` | Secret loading and the `issue-token` command line. |
@@ -67,20 +80,26 @@ To try a change by hand, follow "Quick start" in the README with the fake agent
 
 | Class | Role |
 |---|---|
-| `ProxyController` | Forwards `/api/**` to the server with the token; streams responses through. |
+| `ProxyController` | Forwards `/api/**` to the server with the token; streams responses through. Rewrites session creation: `role` in, the role's `image` and `env` (values read here) out; refuses `image`/`env` sent by the browser. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
 | `ServerConnection` | Server URL, token, and the HTTP client with the trusted CA. |
-| `RoleRegistry`, `RolesController` | Roles (default prompts): Markdown manifests in `~/.bobcrew/roles`, read on every request; `GET /api/roles[/{id}]` answered locally, read-only. UI only, the server knows nothing of roles. Ids must match a strict name pattern and are never joined into a path otherwise; symlinks are ignored. |
+| `RoleRegistry`, `RolesController` | Roles (first prompt, `image`, `env` names): Markdown manifests in `~/.bobcrew/roles`, read on every request; `GET /api/roles[/{id}]` answered locally, read-only. UI only, the server knows nothing of roles. Ids must match a strict name pattern and are never joined into a path otherwise; symlinks are ignored. |
+| `HostEnvironment` | Where a role's environment variable values come from (the UI process's environment); a bean so tests can replace it. |
 | `static/app.js` | The front end: plain JavaScript, no build step, no dependencies. |
 | `static/links.js` | Makes `https://` links in agent and user text clickable (https only, built as DOM elements, never HTML). Tested with `node bobcrew-ui/src/test/js/links.test.js` (Maven runs it too). |
 | `static/transcript-export.js` | Content-to-text helpers and the transcript export (events to a gzipped HTML page). Builds HTML as a string, so all text goes through `esc()`. Tested with `node bobcrew-ui/src/test/js/transcript-export.test.js` (Maven runs it too). |
 
 ## How a prompt flows
 
+0. At creation, `AgentSession.start` has `DockerRuntime` create the container (not started), and
+   builds the SDK client on a `ContainerAcpTransport`, whose `connect` attaches to the container and
+   only then starts it, so no output is lost.
 1. `POST /api/sessions/{id}/prompt` reaches `AgentSession.prompt`, which records a `user_prompt`
    event, sets status `RUNNING`, and returns. The HTTP call answers 202 at once.
-2. A virtual thread calls the SDK's blocking `client.prompt(...)`.
-3. The agent's `session/update` notifications arrive in `AgentSession.onUpdate` and are appended
+2. A virtual thread calls the SDK's blocking `client.prompt(...)`; the request is written as one line
+   to the container's stdin.
+3. The agent's `session/update` notifications arrive (stdout frames, cut into lines by the transport)
+   in `AgentSession.onUpdate` and are appended
    to the `EventLog` unchanged, as `update` events. The server does not interpret them, apart from
    tracking the current mode.
 4. If the agent sends `session/request_permission`, `onPermissionRequest` parks a
@@ -99,10 +118,22 @@ To try a change by hand, follow "Quick start" in the README with the fake agent
   passing them through.
 - **Jackson 3**: Spring Boot 4 uses `tools.jackson.*` (`JsonMapper`, `JsonNode.asString()`), with
   annotations still in `com.fasterxml.jackson.annotation`. Do not add Jackson 2 imports.
-- **Child process handle**: the SDK does not expose the process it starts. `AgentSession.start`
-  finds it by comparing the JVM's children before and after, under `START_LOCK`. The handle is
-  what allows killing the agent's whole process tree and noticing a crash. Keep client
-  construction and `initialize()` inside that lock.
+- **The container transport**: containers have no TTY, so Docker multiplexes stdout and stderr and
+  docker-java hands them over as separate frames; only stdout carries ACP. Frames do not respect line
+  boundaries, so `LineSplitter` reassembles lines. The container is created with `StdinOnce`, so
+  detaching ends the agent's stdin and it exits. When the attach stream ends without a local close, the
+  container died: the transport reports it (with the exit code) and `AgentSession.onAgentExit` marks the
+  session `FAILED`.
+- **The entrypoint keeps stdout clean**: anything an image prints to stdout before or besides the agent
+  becomes an unreadable ACP line. `bobcrew-entrypoint.sh` sends all its output to stderr; images built
+  on bob-base must do the same in their `profile.d` snippets.
+- **docker-java** brings Jackson 2 with it (`com.fasterxml.jackson.databind`). It is for docker-java's
+  own use; our code stays on Jackson 3. Docker 29 refuses API versions below 1.44, so the version is set
+  explicitly (`bobcrew.docker.api-version`). Exec exit codes can appear a moment after the exec's output
+  ends; `DockerRuntime.exec` polls for them.
+- **Leftover containers**: every container carries `bobcrew.managed` and `bobcrew.instance` labels;
+  `DockerRuntime.removeOrphans` removes those of this instance at startup and in `closeAll`. Tests use a
+  random instance id so that they never touch a real server's containers on the same machine.
 - **SSE is written from the request thread** in a blocking loop (`SessionController.events`), not
   with `SseEmitter`. This relies on virtual threads being enabled. `EventLog.close()` must wake
   waiting readers, otherwise shutdown waits for the keepalive interval.
@@ -120,11 +151,16 @@ To try a change by hand, follow "Quick start" in the README with the fake agent
 These are requirements, not preferences. A change that weakens one needs an explicit request from
 the maintainer.
 
-- The Bob API key stays in server configuration and the child's environment. It must never appear
-  in a DTO, an event, a log line, or `toString()`.
+- The Bob API key stays in server configuration and the container's environment. It must never appear
+  in a DTO, an event, a log line, or `toString()`. The same goes for the values of the environment
+  variables clients pass (`ContainerSpec.toString()` and the logs show names only).
 - The JWT secret and tokens are never logged. The UI's token must never be sent to the browser.
-- Every path from a client goes through `Workspaces.resolve`. Do not build paths from request
-  data anywhere else.
+- Every path from a client goes through `ContainerPaths.resolve`. Do not build paths from request
+  data anywhere else. File downloads serve regular files only, never what a symbolic link points to.
+- Containers get no host mounts (binds or volumes), no host environment, no capabilities,
+  `no-new-privileges`, and a non-root user enforced by the server. Images are never pulled. Keep it so.
+- Session creation from the browser goes through the UI's role expansion: the page never sees
+  environment variable values and cannot pick an image or variables itself.
 - The server has no cookies and no CORS headers. Adding either creates a CSRF surface that does
   not exist today.
 - The UI app binds to `127.0.0.1` and has no login; `LocalOnlyFilter` (Host, Origin,
@@ -132,7 +168,7 @@ the maintainer.
   it. New UI endpoints must stay behind it.
 - In `app.js`, text from the agent or from other users is inserted with `textContent` only. No
   `innerHTML`, no inline scripts or styles (the Content-Security-Policy forbids them).
-- `--auto-approve` is not a default agent argument, and the permission timeout rejects.
+- `--auto-approve` is not in the default agent command, and the permission timeout rejects.
 - TLS verification in `ServerConnection` is always on. Do not add a "trust all" option.
 
 ## Conventions
@@ -143,7 +179,7 @@ the maintainer.
   shown to users, so write it for them.
 - Javadoc on classes and on anything non-obvious, saying why rather than what.
 - Every behaviour change comes with a test. Prefer extending `ServerIntegrationTest` (real HTTPS,
-  real child process) for server behaviour; add a keyword to `FakeAcpAgent` if you need the agent
+  real container) for server behaviour; add a keyword to `FakeAcpAgent` if you need the agent
   to do something new, and document it in its class comment and the README.
 - Keep dependencies minimal: a new one needs a reason that the JDK and Spring cannot cover.
 - Commits: short imperative subject, body explaining why. No generated attribution trailers.
@@ -151,7 +187,7 @@ the maintainer.
 ## Where the project is going
 
 The first version is deliberately one process on one machine with no database. The planned next
-shape is a hub: worker processes that own the agent processes, stateless coordinators serving the
+shape is a hub: worker processes that own the agent containers, stateless coordinators serving the
 API, mutual TLS between them, and a small metadata store for users, sessions and worker discovery.
 `SessionManager` is the seam for that split, so keep controllers talking only to it and keep
 `AgentSession` free of HTTP concerns. Other open items are listed under "Not in this version" in

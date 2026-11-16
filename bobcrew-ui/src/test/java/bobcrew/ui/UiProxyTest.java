@@ -30,6 +30,9 @@ import com.sun.net.httpserver.HttpsServer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -54,6 +57,8 @@ class UiProxyTest {
             rolesDir = Files.createDirectory(directory.resolve("roles"));
             Files.writeString(rolesDir.resolve("qa-tester.md"),
                     "---\nname: QA Tester\ndescription: Finds defects\n---\nTest the app.\n");
+            Files.writeString(rolesDir.resolve("builder.md"),
+                    "---\nname: Builder\nimage: bobcrew/bob-java:latest\nenv: GH_TOKEN, NOT_SET_HERE\n---\nBuild it.\n");
             Path keyStoreFile = directory.resolve("upstream.p12");
             Process keytool = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "keytool").toString(),
                     "-genkeypair", "-alias", "server", "-keyalg", "RSA", "-keysize", "2048", "-validity", "2",
@@ -140,6 +145,22 @@ class UiProxyTest {
         registry.add("bobcrew.ui.roles-dir", rolesDir::toString);
     }
 
+    /** Stands in for the UI app's own environment. */
+    @TestConfiguration
+    static class FakeEnvironment {
+
+        @Bean
+        @Primary
+        HostEnvironment fakeHostEnvironment() {
+            return new HostEnvironment() {
+                @Override
+                String get(String name) {
+                    return name.equals("GH_TOKEN") ? "secret-gh-token" : null;
+                }
+            };
+        }
+    }
+
     @LocalServerPort
     int port;
 
@@ -219,12 +240,56 @@ class UiProxyTest {
         HttpResponse<String> posted = browser.send(HttpRequest.newBuilder(uri("/api/sessions"))
             .header("X-BobCrew", "1")
             .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString("{\"workspace\":\"demo\"}"))
+            .POST(HttpRequest.BodyPublishers.ofString("{\"text\":\"demo\"}"))
             .build(), HttpResponse.BodyHandlers.ofString());
         assertThat(posted.statusCode()).isEqualTo(200);
         assertThat(posted.body()).contains("\"method\":\"POST\"")
             .contains("\"contentType\":\"application/json\"")
-            .contains("\"body\":{\"workspace\":\"demo\"}");
+            .contains("\"body\":{\"text\":\"demo\"}");
+    }
+
+    @Test
+    void turnsARoleIntoTheImageAndEnvironmentOfANewSession() throws Exception {
+        HttpResponse<String> created = post("/api/sessions", "{\"title\":\"t\",\"role\":\"builder\"}");
+        assertThat(created.statusCode()).isEqualTo(200);
+        assertThat(created.body()).contains("\"body\":{\"title\":\"t\",\"image\":\"bobcrew/bob-java:latest\","
+                + "\"env\":{\"GH_TOKEN\":\"secret-gh-token\"}}");
+        assertThat(created.headers().firstValue(ProxyController.MISSING_ENV_HEADER)).hasValue("NOT_SET_HERE");
+
+        // on a named server too
+        HttpResponse<String> routed = post("/api/servers/localhost/sessions", "{\"role\":\"builder\"}");
+        assertThat(routed.body()).contains("\"uri\":\"/api/sessions\"").contains("secret-gh-token");
+
+        // a role without image or env, and no role at all
+        assertThat(post("/api/sessions", "{\"role\":\"qa-tester\"}").body()).contains("\"body\":{}");
+        assertThat(post("/api/sessions", "{\"title\":\"plain\"}").body()).contains("\"body\":{\"title\":\"plain\"}");
+        assertThat(post("/api/sessions", "").body()).contains("\"body\":{}");
+    }
+
+    @Test
+    void thePageCannotChooseTheImageOrEnvironmentItself() throws Exception {
+        for (String body : new String[] {"{\"image\":\"evil/image\"}", "{\"env\":{\"X\":\"1\"}}",
+                "{\"role\":\"builder\",\"env\":{}}"}) {
+            HttpResponse<String> refused = post("/api/sessions", body);
+            assertThat(refused.statusCode()).as(body).isEqualTo(400);
+            assertThat(refused.body()).as(body).doesNotContain("\"method\"").doesNotContain("secret-gh-token");
+        }
+        HttpResponse<String> unknown = post("/api/sessions", "{\"role\":\"nope\"}");
+        assertThat(unknown.statusCode()).isEqualTo(400);
+        assertThat(unknown.body()).contains("No such role");
+        assertThat(post("/api/sessions", "[1]").statusCode()).isEqualTo(400);
+        assertThat(post("/api/sessions", "not json").statusCode()).isEqualTo(400);
+        // the role list shows names, never values
+        assertThat(get("/api/roles").body()).contains("\"env\":[\"GH_TOKEN\",\"NOT_SET_HERE\"]")
+            .contains("\"image\":\"bobcrew/bob-java:latest\"").doesNotContain("secret-gh-token");
+    }
+
+    private HttpResponse<String> post(String path, String body) throws Exception {
+        return browser.send(HttpRequest.newBuilder(uri(path))
+            .header("X-BobCrew", "1")
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build(), HttpResponse.BodyHandlers.ofString());
     }
 
     @Test

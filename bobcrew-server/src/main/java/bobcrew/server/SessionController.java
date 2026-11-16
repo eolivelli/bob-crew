@@ -1,11 +1,8 @@
 package bobcrew.server;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.List;
@@ -37,7 +34,17 @@ class SessionController {
 
     private static final Duration KEEPALIVE = Duration.ofSeconds(15);
 
-    record CreateRequest(String workspace, String title) {
+    /** {@code env} values are secrets as far as the server is concerned: never logged or returned. */
+    record CreateRequest(String title, String image, Map<String, String> env) {
+
+        @Override
+        public String toString() {
+            return "CreateRequest[title=" + title + ", image=" + image + ", env="
+                    + (env == null ? "{}" : env.keySet()) + "]";
+        }
+    }
+
+    record ClearRequest(Boolean wipeWorkspace) {
     }
 
     record PromptRequest(String text) {
@@ -66,11 +73,6 @@ class SessionController {
         return Map.of("user", principal.getName());
     }
 
-    @GetMapping("/workspaces")
-    List<String> workspaces() {
-        return sessions.workspaces();
-    }
-
     @GetMapping("/sessions")
     List<AgentSession.Info> list(Principal principal) {
         return sessions.list(principal.getName());
@@ -83,7 +85,7 @@ class SessionController {
         if (title != null && title.length() > 200) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "The title is too long");
         }
-        return sessions.create(principal.getName(), request.workspace(), title).info();
+        return sessions.create(principal.getName(), title, request.image(), request.env()).info();
     }
 
     @GetMapping("/sessions/{id}")
@@ -92,70 +94,28 @@ class SessionController {
     }
 
     @GetMapping("/sessions/{id}/file")
-    void downloadFile(@PathVariable String id, @RequestParam("path") String rawPath, Principal principal,
+    void downloadFile(@PathVariable String id, @RequestParam(value = "path", required = false) String rawPath,
+            Principal principal,
             HttpServletResponse response) throws IOException {
         if (!properties.fileDownloadsEnabled()) {
             throw new ApiException(HttpStatus.FORBIDDEN, "File downloads are disabled on this server");
         }
-        if (rawPath == null || rawPath.isBlank()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "path parameter is required");
-        }
         AgentSession session = sessions.get(principal.getName(), id);
-        Path workspace = session.workspace();
-
-        String pathStr = rawPath.strip();
-        if (pathStr.startsWith("file://")) {
-            pathStr = pathStr.substring("file://".length());
+        try (DockerRuntime.ContainerFile file = session.readFile(rawPath)) {
+            response.setStatus(HttpStatus.OK.value());
+            response.setContentType("application/octet-stream");
+            response.setHeader("Content-Disposition", "attachment; filename=\""
+                    + file.name().replace("\\", "_").replace("\"", "_").replaceAll("[\\r\\n]", "_") + "\"");
+            response.setHeader("X-Content-Type-Options", "nosniff");
+            response.setContentLengthLong(file.size());
+            file.content().transferTo(response.getOutputStream());
         }
-        if (pathStr.indexOf('\0') >= 0) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid path");
-        }
+    }
 
-        Path target;
-        try {
-            Path p = Path.of(pathStr);
-            if (p.isAbsolute()) {
-                target = p.normalize();
-            } else {
-                target = workspace.resolve(p).normalize();
-            }
-        } catch (RuntimeException e) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid path");
-        }
-
-        if (!Files.exists(target)) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "File not found");
-        }
-
-        Path real;
-        try {
-            real = target.toRealPath();
-        } catch (IOException e) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "File not found");
-        }
-
-        if (!real.startsWith(workspace)) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "The file must be inside the session workspace");
-        }
-
-        if (!Files.isRegularFile(real)) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "The requested path is not a file");
-        }
-
-        String filename = real.getFileName().toString();
-        String contentType = Files.probeContentType(real);
-        if (contentType == null) {
-            contentType = "application/octet-stream";
-        }
-
-        response.setStatus(HttpStatus.OK.value());
-        response.setContentType(contentType);
-        response.setHeader("Content-Disposition", "attachment; filename=\"" + filename.replace("\"", "\\\"") + "\"");
-        response.setHeader("Content-Length", String.valueOf(Files.size(real)));
-
-        try (InputStream in = Files.newInputStream(real)) {
-            in.transferTo(response.getOutputStream());
-        }
+    /** A snapshot of the session container's resource use; Docker samples for a second or two. */
+    @GetMapping("/sessions/{id}/metrics")
+    ContainerMetrics metrics(@PathVariable String id, Principal principal) {
+        return sessions.metrics(principal.getName(), id);
     }
 
     @DeleteMapping("/sessions/{id}")
@@ -183,10 +143,15 @@ class SessionController {
         sessions.get(principal.getName(), id).cancel();
     }
 
-    /** Starts the conversation over and wipes the session's workspace; the session stays open. */
+    /**
+     * Starts the conversation over; the session stays open. The workspace is wiped too, unless the body says
+     * {@code {"wipeWorkspace": false}}.
+     */
     @PostMapping("/sessions/{id}/clear")
-    AgentSession.Info clear(@PathVariable String id, Principal principal) {
-        return sessions.clear(principal.getName(), id);
+    AgentSession.Info clear(@PathVariable String id, @RequestBody(required = false) ClearRequest request,
+            Principal principal) {
+        boolean wipe = request == null || request.wipeWorkspace() == null || request.wipeWorkspace();
+        return sessions.clear(principal.getName(), id, wipe);
     }
 
     @PostMapping("/sessions/{id}/mode")

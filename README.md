@@ -12,31 +12,73 @@ Run many [IBM Bob Shell](https://bob.ibm.com/docs/shell/features/acp) sessions o
 them from a browser.
 
 `bob acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) on stdin/stdout, so
-one process serves one local client. bob-crew starts one `bob acp` process per session and puts an
-HTTPS API in front of them.
+one process serves one local client. bob-crew runs each session's `bob acp` in a Docker container of
+its own and puts an HTTPS API in front of them.
 
 ```
 laptop                                             server machine
-browser --http 127.0.0.1--> [bobcrew-ui] --HTTPS + Bearer JWT--> [bobcrew-server] --stdio--> bob acp (N processes)
-          (no login)         pages + proxy                        REST + SSE API
+browser --http 127.0.0.1--> [bobcrew-ui] --HTTPS + Bearer JWT--> [bobcrew-server] --Docker API--> container: bob acp (one per session)
+          (no login)         pages + proxy                        REST + SSE API     attach stdin/stdout
 ```
+
+Each container runs as a non-root user in `/opt/workspace`, sees no directory of the host and none of
+its environment variables, and is removed when its session ends. The image carries every tool the
+agent needs, so the server machine needs only Java and Docker.
 
 | Module | What it is |
 |---|---|
-| `bobcrew-server` | The service. Starts the agent processes, exposes the API over TLS, checks a JWT on every request. |
+| `bobcrew-server` | The service. Starts the agent containers, exposes the API over TLS, checks a JWT on every request. |
 | `bobcrew-ui` | A small app for your laptop. Serves the web pages on `127.0.0.1` and forwards API calls with your token. |
 | `bobcrew-fake-agent` | A scripted ACP agent, for tests and for trying things without a Bob API key. |
+| `docker/` | The session images: `bob-base` (the default), and `bob-java-python` and `bob-java` built on it. |
+| `ui.template/` | A starting `~/.bobcrew/` for the UI: `ui.properties` and an example Developer role. |
 
-Sessions live in memory: restarting the server ends them, as it ends their Bob processes.
+Sessions live in memory: restarting the server ends them and removes their containers.
 
 ## Build
 
-Needs Java 21 and Maven. The build runs all tests against the fake agent; it needs neither Bob nor
-an API key.
+Needs Java 21, Maven and Node.js 18+ (for the UI's script tests). The server tests run the fake
+agent in real containers, so they need a Docker daemon; without one they are skipped. The first run
+pulls `eclipse-temurin:21-jre-ubi9-minimal` to build the test image. Neither Bob nor an API key is
+needed.
 
 ```
 mvn install
 ```
+
+## Session images
+
+The server never pulls images: every image a session uses must already be on the server's Docker.
+
+```
+scripts/build-images.sh                    # bobcrew/bob-base, bob-java-python and bob-java (all :latest)
+scripts/build-images.sh --only java-python # just one (base, java or java-python)
+scripts/build-images.sh --refresh-bob      # reinstall the latest Bob Shell, keep the other layers
+scripts/push-images.sh [-i key] user@host bobcrew/bob-java:latest   # or --all for every bobcrew/* image
+```
+
+`push-images.sh` streams `docker save | gzip` over ssh into `docker load` on the other side, and skips
+images whose ID is already there.
+
+`bobcrew/bob-base` is Red Hat UBI 9 with Bob Shell (installed with the official installer), git, gh,
+Node.js 22 and Linux Homebrew. Its entrypoint, `bobcrew-entrypoint`, is the contract with the server:
+
+- the agent runs as uid 1000 (the server enforces `bobcrew.docker.user`) in `/opt/workspace`;
+- standard input and output carry ACP, so nothing else may write to standard output;
+- `/etc/bobcrew/profile.d/*.sh` are sourced before the agent starts: that is where an image adds
+  `PATH` entries and tool settings (no login shell runs);
+- the command is the server's `bobcrew.agent.command` (by default `bob acp ...`);
+- git and GitHub are set up from environment variables a role can pass: `GIT_USER_NAME` and
+  `GIT_USER_EMAIL` become git's `user.name` and `user.email`, and `GH_TOKEN` (or `GITHUB_TOKEN`) is used
+  by the gh CLI and stored in git's credential store for `https://github.com` (in `$HOME`, mode 600,
+  never in the workspace).
+
+`bobcrew/bob-java-python` ([`docker/bob-java-python`](docker/bob-java-python/Dockerfile)) is the
+development template: JDK 21, Maven 3.9 and Python 3.11 (`python`, `python3` and `pip` are 3.11). It is
+what the example Developer role uses. `bobcrew/bob-java` adds Gradle and Ant instead of Python.
+
+For a stack of your own, copy one of them: build on `bobcrew/bob-base`, put PATH and tool settings in
+a `profile.d` snippet, keep `USER bob` at the end, and name the image in a role.
 
 ## Quick start
 
@@ -50,22 +92,30 @@ scripts/gen-dev-certs.sh certs my-server.example.com
 export BOBCREW_JWT_SECRET_FILE=certs/jwt.secret
 java -jar bobcrew-server/target/bobcrew-server-0.1.0-SNAPSHOT.jar issue-token --user alice --ttl 30d
 
-# 3. Start the server (reads certs/server.crt and certs/server.key by default)
+# 3. The session images (or copy them here with scripts/push-images.sh)
+scripts/build-images.sh
+
+# 4. Start the server (reads certs/server.crt and certs/server.key by default)
 export BOB_API_KEY=...            # the key Bob uses, shared by all sessions
 java -jar bobcrew-server/target/bobcrew-server-0.1.0-SNAPSHOT.jar
 ```
 
-To try it without Bob, point the server at the fake agent instead of setting `BOB_API_KEY`:
+The server's user must be able to use Docker (for example, be in the `docker` group).
+
+To try it without Bob, use the fake agent's test image (built by `mvn install` when Docker is there)
+instead of setting `BOB_API_KEY`:
 
 ```
-export BOB_PATH=java
-export BOB_ARGUMENTS=-jar,$PWD/bobcrew-fake-agent/target/bobcrew-fake-agent-0.1.0-SNAPSHOT-all.jar
+export BOBCREW_DEFAULT_IMAGE=bobcrew-fake-agent:test
+export BOBCREW_AGENT_COMMAND=java,-jar,/opt/fake-agent.jar
 ```
 
 The fake agent reacts to words in the prompt: `tool` (asks permission), `plan`, `slow` (runs until
-stopped), `crash`.
+stopped), `crash`, `whoami` (its user, uid and directory), `showenv NAME` (an environment variable),
+`writefile` (writes `out/hello.txt`), `makelink` (a symbolic link `out/link` to `/etc/passwd`).
 
-On your laptop, with the token and a copy of `certs/ca.crt`, create `~/.bobcrew/ui.properties`:
+On your laptop, `scripts/init-ui-config.sh` prepares `~/.bobcrew/` from [`ui.template/`](ui.template/README.md)
+(it never overwrites a file). With the token and a copy of `certs/ca.crt`, edit `~/.bobcrew/ui.properties`:
 
 ```
 bobcrew.ui.server-url=https://my-server.example.com:8443
@@ -91,10 +141,36 @@ then start the UI and open <http://127.0.0.1:8642>:
 java -jar bobcrew-ui/target/bobcrew-ui-0.1.0-SNAPSHOT.jar
 ```
 
+## Deploying to another machine
+
+From a checkout with the jars built (`mvn install -DskipTests`) and the images built
+(`scripts/build-images.sh`), over ssh:
+
+```
+scripts/push-images.sh [-i key] user@host --all     # the session images (skips what is already there)
+BOB_API_KEY=... scripts/deploy-remote.sh [-i key] user@host   # copy, certify and (re)start the server
+scripts/connect-ui.sh [-i key] user@host             # run the UI here against it
+scripts/deploy-remote.sh [-i key] user@host --stop   # stop it
+```
+
+The remote machine needs Java 21, openssl and Docker usable by that user; Bob itself lives in the
+images. `deploy-remote.sh` starts the server with `scripts/start-server-wide.sh`, which runs Bob with
+`--auto-approve`, MCP servers and subagents, and allows file downloads. Read its header before using it.
+
+| Script | Does |
+|---|---|
+| `scripts/gen-dev-certs.sh` | Private CA, server certificate and JWT secret |
+| `scripts/build-images.sh` | Builds the session images |
+| `scripts/push-images.sh` | Copies images to another machine's Docker over ssh |
+| `scripts/deploy-remote.sh`, `scripts/connect-ui.sh` | Run the server on another machine, and the UI here against it |
+| `scripts/start-server-wide.sh` | Starts the server with permissive agent settings |
+| `scripts/init-ui-config.sh` | Prepares `~/.bobcrew/` from `ui.template/` |
+
 ## Roles
 
-A role is a named default prompt ("QA Tester", "Code reviewer", ...). Roles exist only in the UI app:
-the server never sees them. Each role is a Markdown manifest in `~/.bobcrew/roles/` (or the directory
+A role is a named kind of session ("QA Tester", "Java developer", ...): a first prompt, the Docker image
+to run, and the environment variables to give it. Roles exist only in the UI app: the server never sees
+them. Each role is a Markdown manifest in `~/.bobcrew/roles/` (or the directory
 in `bobcrew.ui.roles-dir`), next to `ui.properties`. The file name without `.md` is the role's id
 (letters, digits, `.`, `_`, `-`; up to 100 characters).
 
@@ -102,13 +178,24 @@ in `bobcrew.ui.roles-dir`), next to `ui.properties`. The file name without `.md`
 ---
 name: QA Tester
 description: Exercises the application and reports defects
+image: bobcrew/bob-java:latest
+env: GH_TOKEN, JIRA_TOKEN
 ---
-You are a QA tester. Run the application, try to break it, and report each defect with the
-steps to reproduce it.
+You are a QA tester. Clone the repository, run the application, try to break it, and report each
+defect with the steps to reproduce it.
 ```
 
-The front matter is optional and understands only `name` (default: the id) and `description`; the rest of
-the file is the prompt. Files that are not `.md`, are symbolic links, are larger than 64 KiB, have an
+[`ui.template/roles/developer.md`](ui.template/roles/developer.md) is a complete example: a Java and
+Python developer in `bobcrew/bob-java-python`, given `GH_TOKEN`, `GIT_USER_NAME` and `GIT_USER_EMAIL`,
+told to work per ticket with unit tests, the ticket id in commit messages, and a subagent review of each
+patch before committing (which needs a server running Bob without `--disable-subagents`).
+
+The front matter is optional. It understands `name` (default: the id), `description`, `image` (default:
+the server's `bobcrew.docker.default-image`) and `env`: names of environment variables, separated by
+commas or spaces. When a session is created with the role, the UI app reads those variables from **its
+own** environment (the laptop's, not the server's) and passes them to the session's container; the
+values never go through the browser, and a variable that is not set is left out (the page says which).
+The browser cannot choose an image or variables without a role. The rest of the file is the prompt. Files that are not `.md`, are symbolic links, are larger than 64 KiB, have an
 empty prompt, or come after the first 200 are ignored (a warning is logged). The directory is read on every
 request, so changes show up without restarting the UI.
 
@@ -125,6 +212,14 @@ last `bobcrew.event-buffer-size` events (5000 by default), and the page says so 
 session is missing. The file has no scripts and carries a Content-Security-Policy that blocks all
 network access.
 
+## Clearing a session and container metrics
+
+**Clear** in a session's header starts the conversation over in the same container. It asks whether to
+keep the workspace's files (useful when the agent has cloned a repository there) or delete them.
+
+**Metrics** opens a small panel with the container's state, uptime, CPU, memory (used and limit),
+process count, network and disk I/O. It is fetched only while the panel is open, every 5 seconds.
+
 ## Server configuration
 
 Set as environment variables, or as the Spring properties in
@@ -136,25 +231,35 @@ Set as environment variables, or as the Spring properties in
 | `BOBCREW_TLS_CERT`, `BOBCREW_TLS_KEY` | `file:certs/server.crt`, `file:certs/server.key` | PEM certificate (chain) and private key |
 | `BOBCREW_JWT_SECRET_FILE` | none, required | File with the HS256 secret, at least 32 bytes |
 | `BOBCREW_REVOKED_JTI_FILE` | none | File listing revoked token ids, one per line |
-| `BOBCREW_WORKSPACE_ROOT` | `./workspaces` | Every session works in a directory under this one |
 | `BOBCREW_FILE_DOWNLOADS_ENABLED` | `false` | Whether clients may download files from a session's workspace |
-| `BOB_PATH` | `bob` | Agent executable |
-| `BOB_ARGUMENTS` | `acp,--trust,--accept-license,--disable-mcp,--disable-subagents` | Its arguments, comma separated |
-| `BOB_API_KEY` | none | Passed to the agent as `BOB_API_KEY` and `BOBSHELL_API_KEY` |
+| `BOBCREW_AGENT_COMMAND` | `bob,acp,--trust,--accept-license,--disable-mcp,--disable-subagents` | The command run in each container, comma separated |
+| `BOB_API_KEY` | none | Passed to the container as `BOB_API_KEY` and `BOBSHELL_API_KEY` |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | The Docker daemon |
+| `BOBCREW_DOCKER_API_VERSION` | `1.44` | Docker Engine API version (Docker 29 needs 1.44 or newer) |
+| `BOBCREW_DEFAULT_IMAGE` | `bobcrew/bob-base:latest` | Image for sessions whose role names none |
+| `BOBCREW_INSTANCE_ID` | `default` | Labels this server's containers; servers sharing a Docker daemon need different ids |
 
 Further properties: `bobcrew.max-sessions` (8), `bobcrew.request-timeout` (30s),
 `bobcrew.prompt-timeout` (10m), `bobcrew.permission-timeout` (2m), `bobcrew.idle-timeout` (12h),
-`bobcrew.event-buffer-size` (5000), `bobcrew.file-downloads-enabled` (false), `bobcrew.agent.inherit-environment` (false).
+`bobcrew.event-buffer-size` (5000), and per container `bobcrew.docker.user` (`1000:1000`, never root),
+`bobcrew.docker.memory-limit` (4GB), `bobcrew.docker.cpus` (2), `bobcrew.docker.pids-limit` (1024),
+`bobcrew.docker.network` (`bridge`), `bobcrew.docker.stop-timeout` (5s), `bobcrew.docker.max-env-vars`
+(32), `bobcrew.docker.max-env-value-length` (32768).
+
+**Containers.** Each session's container is created with the labels `bobcrew.managed=true`,
+`bobcrew.instance=<instance id>`, `bobcrew.session` and `bobcrew.owner`. When the server starts, and when
+it stops, it removes every container with its instance id, so a server killed with `kill -9` leaves
+nothing behind once restarted. The containers get Docker's init process, no capabilities,
+`no-new-privileges`, the limits above, and no mounts.
 
 Notes on Bob:
 
 - `--trust` is on by default because Bob refuses to create a session in a workspace it does not
   trust. `--auto-approve` is deliberately not on: tool calls ask for permission in the UI, and a
   request nobody answers within the permission timeout is rejected.
-- Without an API key (and without a stored SSO login for the server's user) Bob answers
-  "Authentication required" and the session is not created.
-- The agent process gets a minimal environment (`HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`)
-  plus the API key. Set `bobcrew.agent.inherit-environment=true` if your tools need more.
+- Without an API key Bob answers "Authentication required" and the session is not created.
+- The container's environment is the image's, plus the API key, `BOBCREW_SESSION_ID` and what the
+  session's role passes. Nothing comes from the server's own environment.
 
 ## Security
 
@@ -166,9 +271,20 @@ Notes on Bob:
   replace the secret and restart.
 - **Users and sessions**: the session records its creator as owner. For now every valid token can
   see and use every session; prompts and permission answers record who made them.
-- **Workspaces**: a client names a directory relative to the workspace root. Absolute paths, `..`
-  and symbolic links leading outside are refused before any process starts.
-- **The API key** stays in the server's configuration. It is never part of a response or event.
+- **Isolation**: each session is a container with no host directories, no host environment, a
+  non-root user, no capabilities and resource limits. The workspace, `/opt/workspace`, lives and dies
+  with the container. Containers share Docker's default bridge network, as the agent needs to reach its
+  model API.
+- **Images**: never pulled. Whoever runs Docker on the server decides what can run; a client naming an
+  image that is not there gets 400.
+- **Environment variables**: a client may set at most 32, with plain names; `BOB_API_KEY`,
+  `BOBSHELL_API_KEY`, `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `HOSTNAME`, `BOBCREW_*` and `LD_*` are refused.
+  Their values are never logged or returned (only the names are logged). Anyone who can use a session
+  can ask its agent for them, so a role should pass only what every user of the server may see.
+- **File downloads**: the path must stay inside `/opt/workspace`, and only regular files are served, so
+  a symbolic link cannot lead elsewhere in the container.
+- **The API key** stays in the server's configuration and the containers' environment. It is never part
+  of a response or event.
 - **The UI app** has no login, so it listens on `127.0.0.1` only and holds the token itself; the
   token never reaches the browser's JavaScript. It refuses requests whose `Host` is not the
   loopback interface, requests from other origins, and changes without its `X-BobCrew` header, so
@@ -181,33 +297,37 @@ All under `/api`, with `Authorization: Bearer <token>`.
 | Request | Does |
 |---|---|
 | `GET /me` | The token's user |
-| `GET /workspaces` | Directories under the workspace root |
 | `GET /sessions` | All sessions |
-| `POST /sessions` `{"workspace": "dir", "title": "..."}` | Creates a session and starts its agent |
-| `GET /sessions/{id}` | One session |
-| `DELETE /sessions/{id}` | Closes it and ends its agent process |
-| `GET /sessions/{id}/file?path=<path>` | Downloads a file from the session's workspace (refused with 403 if downloads are disabled) |
+| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}}` | Creates a session and starts its agent in a new container; all fields optional (`image` defaults to the server's default image). 400 if the image is not on the server or a variable is refused |
+| `GET /sessions/{id}` | One session: `id`, `owner`, `title`, `image`, `containerId`, `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
+| `DELETE /sessions/{id}` | Closes it and removes its container |
+| `GET /sessions/{id}/file?path=<path>` | Downloads a regular file from the session's workspace; `path` is relative to `/opt/workspace` or absolute inside it, `file://` allowed (403 if downloads are disabled) |
+| `GET /sessions/{id}/metrics` | A snapshot of the container: `state`, `startedAt`, `uptimeSeconds`, `cpuPercent` (100 = one core), `memoryUsageBytes`, `memoryLimitBytes`, `pids`, `networkRxBytes`, `networkTxBytes`, `blockReadBytes`, `blockWriteBytes`. Docker samples for a second or two |
 | `POST /sessions/{id}/prompt` `{"text": "..."}` | Starts a turn; progress arrives as events |
 | `POST /sessions/{id}/cancel` | Stops the running turn |
-| `POST /sessions/{id}/clear` | Starts the conversation over (a fresh agent session in the same agent process, earlier events forgotten) and deletes everything in the session's workspace; the session stays open. Only when idle; refused (409) while another open session uses that directory, nested or not, and (400) for the workspace root |
+| `POST /sessions/{id}/clear` `{"wipeWorkspace": true}` | Starts the conversation over (a fresh agent session in the same container, earlier events forgotten); the session stays open. Deletes everything in the workspace unless `wipeWorkspace` is `false` (the body is optional). Only when idle (409 otherwise) |
 | `POST /sessions/{id}/mode` `{"modeId": "..."}` | Switches the agent's mode |
 | `POST /sessions/{id}/permissions/{toolCallId}` `{"optionId": "..."}` | Answers a permission request |
 | `GET /sessions/{id}/events?after=<seq>` | Server-Sent Events: the session's events after `seq`, then new ones |
 
 The UI app answers two more paths itself, without contacting a server: `GET /api/roles` (`[{"id", "name",
-"description"}]`) and `GET /api/roles/{id}` (adds `prompt` and the raw `manifest`; 404 if there is no such role).
+"description", "image", "env"}]`, `env` being names only) and `GET /api/roles/{id}` (adds `prompt` and the raw
+`manifest`; 404 if there is no such role). It also rewrites `POST /api/sessions`: the page sends
+`{"title", "role"}`, and the server receives the role's `image` and `env` (header `X-BobCrew-Missing-Env`
+lists the variables that were not set).
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,
-`permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here). The server keeps the last 5000 events of a
+`permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here; `data.workspaceWiped` says whether the files went too). The server keeps the last 5000 events of a
 session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss nothing.
 
 ## Not in this version
 
 One process on one machine, by design. A later version can split it into workers (which own the
-agent processes), stateless coordinators and a small metadata store; `SessionManager` is the seam
+agent containers), stateless coordinators and a small metadata store; `SessionManager` is the seam
 for that. Also not done yet: per-user API keys, cloning a git repository into a new workspace,
-restricting sessions to their owner, resuming a session after a restart.
+restricting sessions to their owner, resuming a session after a restart, workspaces that outlive their
+session or are shared between sessions, pulling images, per-session network policies, metrics history.
 
 ## License
 

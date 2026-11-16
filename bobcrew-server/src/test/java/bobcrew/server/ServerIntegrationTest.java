@@ -18,11 +18,16 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Capability;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.MACSigner;
@@ -30,6 +35,8 @@ import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -38,9 +45,10 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Runs the real server over HTTPS on a random port, with the fake agent as its agent process, and
- * talks to it as a client would.
+ * Runs the real server over HTTPS on a random port, with the fake agent in real Docker containers, and
+ * talks to it as a client would. Skipped when no Docker daemon is reachable.
  */
+@ExtendWith(TestDocker.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class ServerIntegrationTest {
 
@@ -62,31 +70,30 @@ class ServerIntegrationTest {
             tls = TestTls.generate(directory);
             Files.writeString(directory.resolve("jwt.secret"), SECRET + "\n");
             revokedFile = directory.resolve("revoked.txt");
-            Files.createDirectories(directory.resolve("workspaces"));
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
         }
     }
 
+    private static String instanceId;
+
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
+        instanceId = TestDocker.register(registry);
         registry.add("bobcrew.tls.certificate", () -> "file:" + tls.certificatePem);
         registry.add("bobcrew.tls.private-key", () -> "file:" + tls.privateKeyPem);
         registry.add("bobcrew.auth.jwt-secret-file", () -> directory.resolve("jwt.secret").toString());
         registry.add("bobcrew.auth.revoked-jti-file", revokedFile::toString);
-        registry.add("bobcrew.workspace-root", () -> directory.resolve("workspaces").toString());
         registry.add("bobcrew.max-sessions", () -> "3");
         registry.add("bobcrew.permission-timeout", () -> "2s");
         registry.add("bobcrew.agent.api-key", () -> API_KEY);
-        // the fake agent, started from this test's own classpath
-        registry.add("bobcrew.agent.binary", () -> Path.of(System.getProperty("java.home"), "bin", "java").toString());
-        registry.add("bobcrew.agent.arguments[0]", () -> "-cp");
-        registry.add("bobcrew.agent.arguments[1]", () -> System.getProperty("java.class.path"));
-        registry.add("bobcrew.agent.arguments[2]", () -> "bobcrew.fakeagent.FakeAcpAgent");
     }
 
     @LocalServerPort
     int port;
+
+    @Autowired
+    DockerRuntime docker;
 
     private final HttpClient http = HttpClient.newBuilder().sslContext(tls.clientContext).build();
 
@@ -153,13 +160,14 @@ class ServerIntegrationTest {
 
     @Test
     void streamsAPromptTurnAndReplaysIt() throws Exception {
-        JsonNode session = createSession("project-a", "First");
+        JsonNode session = createSession("First");
         String id = session.get("id").asString();
         assertThat(session.get("owner").asString()).isEqualTo("alice");
+        assertThat(session.get("title").asString()).isEqualTo("First");
         assertThat(session.get("status").asString()).isEqualTo("IDLE");
-        assertThat(session.get("workspace").asString()).isEqualTo("project-a");
+        assertThat(session.get("image").asString()).isEqualTo(TestDocker.IMAGE);
+        assertThat(session.get("containerId").asString()).hasSize(12);
         assertThat(session.get("modes")).hasSize(3);
-        assertThat(directory.resolve("workspaces/project-a")).isDirectory();
 
         assertThat(send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"hello world\"}", alice).statusCode())
             .isEqualTo(202);
@@ -198,7 +206,7 @@ class ServerIntegrationTest {
 
     @Test
     void aUserAnswersAPermissionRequest() throws Exception {
-        String id = createSession("project-b", null).get("id").asString();
+        String id = createSession(null).get("id").asString();
         send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"use a tool\"}", alice);
         List<JsonNode> asked = events(id, 0, event -> event.get("type").asString().equals("permission_request"));
         JsonNode request = asked.get(asked.size() - 1).get("data");
@@ -224,7 +232,7 @@ class ServerIntegrationTest {
 
     @Test
     void anUnansweredPermissionRequestIsRejected() throws Exception {
-        String id = createSession("project-c", null).get("id").asString();
+        String id = createSession(null).get("id").asString();
         send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"use a tool\"}", alice);
         List<JsonNode> events = events(id, 0, event -> isStatus(event, "IDLE") && event.get("seq").asLong() > 1);
         JsonNode resolved = first(events, "permission_resolved");
@@ -236,7 +244,7 @@ class ServerIntegrationTest {
 
     @Test
     void aRunningTurnCanBeCancelledAndRefusesASecondPrompt() throws Exception {
-        String id = createSession("project-d", null).get("id").asString();
+        String id = createSession(null).get("id").asString();
         send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"be slow\"}", alice);
         List<JsonNode> started = events(id, 0, event -> "agent_message_chunk".equals(updateKind(event)));
         assertThat(send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"again\"}", alice).statusCode())
@@ -248,7 +256,7 @@ class ServerIntegrationTest {
 
     @Test
     void passesOnPlansModeChangesAndUnknownUpdates() throws Exception {
-        String id = createSession("project-e", null).get("id").asString();
+        String id = createSession(null).get("id").asString();
         HttpResponse<String> mode = send("POST", "/sessions/" + id + "/mode", "{\"modeId\":\"plan\"}", alice);
         assertThat(mode.statusCode()).isEqualTo(200);
         assertThat(JSON.readTree(mode.body()).get("currentMode").asString()).isEqualTo("plan");
@@ -265,7 +273,7 @@ class ServerIntegrationTest {
 
     @Test
     void reportsAnAgentThatDies() throws Exception {
-        String id = createSession("project-f", null).get("id").asString();
+        String id = createSession(null).get("id").asString();
         send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"crash now\"}", alice);
         List<JsonNode> events = events(id, 0, event -> isStatus(event, "FAILED"));
         assertThat(types(events)).contains("error");
@@ -277,7 +285,7 @@ class ServerIntegrationTest {
 
     @Test
     void closingASessionEndsItsStream() throws Exception {
-        String id = createSession("project-g", null).get("id").asString();
+        String id = createSession(null).get("id").asString();
         CompletableFuture<List<String>> stream = CompletableFuture.supplyAsync(() -> rawStream(id));
         Thread.sleep(300);
         assertThat(send("DELETE", "/sessions/" + id, null, alice).statusCode()).isEqualTo(204);
@@ -289,17 +297,119 @@ class ServerIntegrationTest {
     }
 
     @Test
-    void clearingStartsOverAndWipesTheWorkspaceButKeepsTheSession() throws Exception {
-        JsonNode session = createSession("clear-a", null);
-        String id = session.get("id").asString();
-        Path workspace = directory.resolve("workspaces/clear-a");
-        Files.writeString(workspace.resolve("notes.txt"), "x");
-        Files.createDirectories(workspace.resolve("sub/dir"));
-        Files.writeString(workspace.resolve("sub/dir/.hidden"), "y");
-        Files.writeString(directory.resolve("workspaces/untouched.txt"), "z");
+    void closingASessionRemovesItsContainer() throws Exception {
+        String container = createSession(null).get("containerId").asString();
+        assertThat(TestDocker.client().inspectContainerCmd(container).exec().getState().getRunning()).isTrue();
+        send("DELETE", "/sessions/" + created.remove(0), null, alice);
+        try {
+            TestDocker.client().inspectContainerCmd(container).exec();
+            fail("the container is still there");
+        } catch (NotFoundException e) {
+            // removed
+        }
+    }
 
-        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"first\"}", alice);
+    // ---- containers --------------------------------------------------------
+
+    @Test
+    void runsTheAgentInAnIsolatedContainer() throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("env", Map.of("TEST_MARKER", "marker-value", "GH_TOKEN", "a-token"));
+        JsonNode session = create(body);
+        String id = session.get("id").asString();
+        assertThat(session.toString()).as("env values are not echoed").doesNotContain("marker-value");
+
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"whoami showenv TEST_MARKER\"}", alice);
+        String text = agentText(events(id, 0, event -> isStatus(event, "IDLE") && event.get("seq").asLong() > 1));
+        assertThat(text).contains("uid=1000", "cwd=/opt/workspace", "env TEST_MARKER=marker-value");
+
+        InspectContainerResponse container = TestDocker.client()
+            .inspectContainerCmd(session.get("containerId").asString()).exec();
+        assertThat(container.getConfig().getUser()).isEqualTo("1000:1000");
+        assertThat(container.getConfig().getLabels()).containsEntry(DockerRuntime.LABEL_MANAGED, "true")
+            .containsEntry(DockerRuntime.LABEL_INSTANCE, instanceId)
+            .containsEntry(DockerRuntime.LABEL_SESSION, id)
+            .containsEntry(DockerRuntime.LABEL_OWNER, "alice");
+        assertThat(container.getMounts()).as("no host directories").isEmpty();
+        assertThat(container.getHostConfig().getBinds()).isNullOrEmpty();
+        assertThat(container.getHostConfig().getCapDrop()).contains(Capability.ALL);
+        assertThat(container.getHostConfig().getSecurityOpts()).contains("no-new-privileges");
+        assertThat(container.getHostConfig().getInit()).isTrue();
+        assertThat(container.getHostConfig().getMemory()).isEqualTo(512L * 1024 * 1024);
+
+        // the environment is the image's plus what the server and the client put there, nothing from this host
+        List<String> imageEnv = List.of(TestDocker.client().inspectImageCmd(TestDocker.IMAGE).exec()
+            .getConfig().getEnv());
+        List<String> extra = new ArrayList<>(List.of(container.getConfig().getEnv()));
+        extra.removeAll(imageEnv);
+        assertThat(extra.stream().map(entry -> entry.substring(0, entry.indexOf('='))))
+            .containsExactlyInAnyOrder("TEST_MARKER", "GH_TOKEN", "BOB_API_KEY", "BOBSHELL_API_KEY", "BOBCREW_SESSION_ID");
+    }
+
+    @Test
+    void validatesImagesAndEnvironment() throws Exception {
+        assertThat(createStatus(Map.of("image", "bobcrew-no-such-image:never"))).isEqualTo(400);
+        assertThat(createStatus(Map.of("image", "bad image name"))).isEqualTo(400);
+        for (String name : List.of("BOB_API_KEY", "BOBSHELL_API_KEY", "PATH", "HOME", "BOBCREW_X", "LD_PRELOAD",
+                "1BAD", "BAD-NAME", "")) {
+            assertThat(createStatus(Map.of("env", Map.of(name, "x")))).as(name).isEqualTo(400);
+        }
+        assertThat(createStatus(Map.of("env", Map.of("BIG", "x".repeat(40_000))))).isEqualTo(400);
+        assertThat(JSON.readTree(send("GET", "/sessions", null, alice).body())).isEmpty();
+        assertThat(TestDocker.client().listContainersCmd().withShowAll(true)
+            .withLabelFilter(Map.of(DockerRuntime.LABEL_INSTANCE, instanceId)).exec())
+            .as("refused sessions leave no container").isEmpty();
+    }
+
+    @Test
+    void reportsContainerMetrics() throws Exception {
+        String id = createSession(null).get("id").asString();
+        HttpResponse<String> response = send("GET", "/sessions/" + id + "/metrics", null, alice);
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+        JsonNode metrics = JSON.readTree(response.body());
+        assertThat(metrics.get("state").asString()).isEqualTo("running");
+        assertThat(metrics.get("image").asString()).isEqualTo(TestDocker.IMAGE);
+        assertThat(metrics.get("memoryUsageBytes").asLong()).isPositive();
+        assertThat(metrics.get("memoryLimitBytes").asLong()).isEqualTo(512L * 1024 * 1024);
+        assertThat(metrics.get("pids").asLong()).isPositive();
+        assertThat(metrics.get("cpuPercent").isNumber()).isTrue();
+        assertThat(metrics.get("uptimeSeconds").asLong()).isGreaterThanOrEqualTo(0);
+        assertThat(send("GET", "/sessions/no-such-session/metrics", null, alice).statusCode()).isEqualTo(404);
+    }
+
+    @Test
+    void removesLeftoverContainersOfThisInstanceOnly() throws Exception {
+        String mine = TestDocker.client().createContainerCmd(TestDocker.IMAGE)
+            .withLabels(Map.of(DockerRuntime.LABEL_MANAGED, "true", DockerRuntime.LABEL_INSTANCE, instanceId))
+            .withCmd("true")
+            .exec().getId();
+        String other = TestDocker.client().createContainerCmd(TestDocker.IMAGE)
+            .withLabels(Map.of(DockerRuntime.LABEL_MANAGED, "true", DockerRuntime.LABEL_INSTANCE, instanceId + "-other"))
+            .withCmd("true")
+            .exec().getId();
+        try {
+            docker.removeOrphans();
+            try {
+                TestDocker.client().inspectContainerCmd(mine).exec();
+                fail("the leftover container is still there");
+            } catch (NotFoundException e) {
+                // removed
+            }
+            assertThat(TestDocker.client().inspectContainerCmd(other).exec().getId()).isEqualTo(other);
+        } finally {
+            TestDocker.client().removeContainerCmd(other).withForce(true).exec();
+        }
+    }
+
+    @Test
+    void clearingStartsOverAndWipesTheWorkspaceButKeepsTheSession() throws Exception {
+        JsonNode session = createSession(null);
+        String id = session.get("id").asString();
+        String container = session.get("containerId").asString();
+
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"writefile\"}", alice);
         List<JsonNode> before = events(id, 0, event -> isStatus(event, "IDLE") && event.get("seq").asLong() > 1);
+        assertThat(exists(container, "/opt/workspace/out/hello.txt")).isTrue();
 
         HttpResponse<String> cleared = send("POST", "/sessions/" + id + "/clear", null, token("carol"));
         assertThat(cleared.statusCode()).as(cleared.body()).isEqualTo(200);
@@ -307,17 +417,14 @@ class ServerIntegrationTest {
         assertThat(info.get("id").asString()).isEqualTo(id);
         assertThat(info.get("status").asString()).isEqualTo("IDLE");
         assertThat(info.get("owner").asString()).isEqualTo("alice");
-
-        assertThat(workspace).isDirectory();
-        try (var children = Files.list(workspace)) {
-            assertThat(children).isEmpty();
-        }
-        assertThat(directory.resolve("workspaces/untouched.txt")).exists();
+        assertThat(exists(container, "/opt/workspace/out")).isFalse();
+        assertThat(exists(container, "/opt/workspace")).isTrue();
 
         // a client that connects now sees the start of the new conversation, not the old one
         List<JsonNode> after = events(id, 0, event -> isStatus(event, "IDLE"));
         assertThat(types(after)).containsExactly("cleared", "status");
         assertThat(after.get(0).get("user").asString()).isEqualTo("carol");
+        assertThat(after.get(0).get("data").get("workspaceWiped").asBoolean()).isTrue();
         assertThat(after.get(0).get("seq").asLong()).isGreaterThan(before.get(before.size() - 1).get("seq").asLong());
         assertThat(JSON.readTree(send("GET", "/sessions", null, alice).body())).hasSize(1);
 
@@ -330,53 +437,48 @@ class ServerIntegrationTest {
     }
 
     @Test
-    void clearingIsRefusedWhileBusyOrWhenTheWorkspaceIsSharedOrIsTheRoot() throws Exception {
-        String busy = createSession("clear-busy", null).get("id").asString();
-        Files.writeString(directory.resolve("workspaces/clear-busy/keep.txt"), "x");
-        send("POST", "/sessions/" + busy + "/prompt", "{\"text\":\"be slow\"}", alice);
+    void clearingCanKeepTheWorkspace() throws Exception {
+        JsonNode session = createSession(null);
+        String id = session.get("id").asString();
+        String container = session.get("containerId").asString();
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"writefile\"}", alice);
+        events(id, 0, event -> isStatus(event, "IDLE") && event.get("seq").asLong() > 1);
+
+        HttpResponse<String> cleared = send("POST", "/sessions/" + id + "/clear", "{\"wipeWorkspace\":false}", alice);
+        assertThat(cleared.statusCode()).as(cleared.body()).isEqualTo(200);
+        assertThat(exists(container, "/opt/workspace/out/hello.txt")).isTrue();
+        List<JsonNode> after = events(id, 0, event -> isStatus(event, "IDLE"));
+        assertThat(types(after)).containsExactly("cleared", "status");
+        assertThat(after.get(0).get("data").get("workspaceWiped").asBoolean()).isFalse();
+    }
+
+    @Test
+    void clearingIsRefusedWhileBusy() throws Exception {
+        JsonNode session = createSession(null);
+        String busy = session.get("id").asString();
+        send("POST", "/sessions/" + busy + "/prompt", "{\"text\":\"writefile and be slow\"}", alice);
         events(busy, 0, event -> "agent_message_chunk".equals(updateKind(event)));
         assertThat(send("POST", "/sessions/" + busy + "/clear", null, alice).statusCode()).isEqualTo(409);
-        assertThat(directory.resolve("workspaces/clear-busy/keep.txt")).exists();
+        assertThat(exists(session.get("containerId").asString(), "/opt/workspace/out/hello.txt")).isTrue();
         send("POST", "/sessions/" + busy + "/cancel", null, alice);
         events(busy, 0, event -> "turn_end".equals(event.get("type").asString()));
-
-        // a second open session in the same directory, and one nested inside it
-        createSession("clear-busy/inner", null);
-        assertThat(send("POST", "/sessions/" + busy + "/clear", null, alice).statusCode()).isEqualTo(409);
-        assertThat(directory.resolve("workspaces/clear-busy/keep.txt")).exists();
-
-        String root = createSession(".", null).get("id").asString();
-        assertThat(send("POST", "/sessions/" + root + "/clear", null, alice).statusCode()).isEqualTo(400);
-        assertThat(directory.resolve("workspaces/clear-busy/keep.txt")).exists();
 
         assertThat(send("POST", "/sessions/no-such-session/clear", null, alice).statusCode()).isEqualTo(404);
         assertThat(send("POST", "/sessions/" + busy + "/clear", null, null).statusCode()).isEqualTo(401);
     }
 
     @Test
-    void refusesWorkspacesOutsideTheRoot() throws Exception {
-        for (String workspace : List.of("../outside", "/tmp", "a/../../outside", "")) {
-            HttpResponse<String> response = send("POST", "/sessions",
-                    JSON.writeValueAsString(java.util.Map.of("workspace", workspace)), alice);
-            assertThat(response.statusCode()).as(workspace).isEqualTo(400);
-        }
-        assertThat(directory.resolve("outside")).doesNotExist();
-        assertThat(JSON.readTree(send("GET", "/sessions", null, alice).body())).isEmpty();
-    }
-
-    @Test
     void limitsTheNumberOfSessions() throws Exception {
         for (int i = 0; i < 3; i++) {
-            createSession("limit-" + i, null);
+            createSession("limit-" + i);
         }
-        HttpResponse<String> response = send("POST", "/sessions", "{\"workspace\":\"limit-4\"}", alice);
+        HttpResponse<String> response = send("POST", "/sessions", "{\"title\":\"limit-4\"}", alice);
         assertThat(response.statusCode()).isEqualTo(429);
-        assertThat(JSON.readTree(send("GET", "/workspaces", null, alice).body()).toString()).contains("limit-0");
     }
 
     @Test
     void validatesPrompts() throws Exception {
-        String id = createSession("project-h", null).get("id").asString();
+        String id = createSession(null).get("id").asString();
         assertThat(send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"  \"}", alice).statusCode()).isEqualTo(400);
         assertThat(send("POST", "/sessions/no-such-session/prompt", "{\"text\":\"hi\"}", alice).statusCode())
             .isEqualTo(404);
@@ -384,9 +486,7 @@ class ServerIntegrationTest {
 
     @Test
     void downloadingFilesWhenDisabledReturnsForbidden() throws Exception {
-        String id = createSession("dl-disabled", null).get("id").asString();
-        Path ws = directory.resolve("workspaces/dl-disabled");
-        Files.writeString(ws.resolve("hello.txt"), "hello world");
+        String id = createSession(null).get("id").asString();
 
         HttpResponse<String> response = send("GET", "/sessions/" + id + "/file?path=hello.txt", null, alice);
         assertThat(response.statusCode()).isEqualTo(403);
@@ -433,14 +533,43 @@ class ServerIntegrationTest {
         return http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
     }
 
-    private JsonNode createSession(String workspace, String title) throws Exception {
-        String body = title == null ? "{\"workspace\":\"" + workspace + "\"}"
-                : "{\"workspace\":\"" + workspace + "\",\"title\":\"" + title + "\"}";
-        HttpResponse<String> response = send("POST", "/sessions", body, alice);
+    private JsonNode createSession(String title) throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        if (title != null) {
+            body.put("title", title);
+        }
+        return create(body);
+    }
+
+    private JsonNode create(Map<String, Object> body) throws Exception {
+        HttpResponse<String> response = send("POST", "/sessions", JSON.writeValueAsString(body), alice);
         assertThat(response.statusCode()).as(response.body()).isEqualTo(201);
         JsonNode session = JSON.readTree(response.body());
         created.add(session.get("id").asString());
         return session;
+    }
+
+    private int createStatus(Map<String, Object> body) throws Exception {
+        HttpResponse<String> response = send("POST", "/sessions", JSON.writeValueAsString(body), alice);
+        if (response.statusCode() == 201) {
+            created.add(JSON.readTree(response.body()).get("id").asString());
+        }
+        return response.statusCode();
+    }
+
+    /** Whether a path exists in a container, checked with {@code test -e} run in it. */
+    private static boolean exists(String container, String path) throws Exception {
+        String exec = TestDocker.client().execCreateCmd(container).withCmd("test", "-e", path)
+            .withAttachStdout(true).withAttachStderr(true).exec().getId();
+        TestDocker.client().execStartCmd(exec).start().awaitCompletion(30, TimeUnit.SECONDS);
+        for (int i = 0; i < 100; i++) {
+            var inspected = TestDocker.client().inspectExecCmd(exec).exec();
+            if (!Boolean.TRUE.equals(inspected.isRunning()) && inspected.getExitCodeLong() != null) {
+                return inspected.getExitCodeLong() == 0;
+            }
+            Thread.sleep(50);
+        }
+        return fail("the exec did not finish");
     }
 
     /** Reads the session's events after {@code after} until one matches; fails after 30 seconds. */

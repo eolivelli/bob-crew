@@ -27,6 +27,35 @@ class RoleRegistryTest {
         assertThat(role.description()).isEqualTo("Finds defects");
         assertThat(role.prompt()).isEqualTo("Test the app.\nReport bugs.");
         assertThat(role.manifest()).startsWith("---\nname: QA Tester");
+        assertThat(role.image()).isNull();
+        assertThat(role.env()).isEmpty();
+    }
+
+    @Test
+    void readsTheImageAndTheEnvironmentVariableNames() throws Exception {
+        Files.writeString(directory.resolve("builder.md"), "---\nname: Builder\nimage: bobcrew/bob-java:latest\n"
+                + "env: GH_TOKEN, JIRA_TOKEN  MAVEN_OPTS,GH_TOKEN, bad-name, 9X\n---\nBuild it.\n");
+        RoleRegistry.Role role = registry().get("builder").orElseThrow();
+        assertThat(role.image()).isEqualTo("bobcrew/bob-java:latest");
+        assertThat(role.env()).containsExactly("GH_TOKEN", "JIRA_TOKEN", "MAVEN_OPTS");
+    }
+
+    @Test
+    void theTemplateDeveloperRoleIsValid() {
+        Path templates = Path.of(System.getProperty("basedir", ".")).toAbsolutePath().resolveSibling("ui.template")
+            .resolve("roles");
+        RoleRegistry.Role developer = new RoleRegistry(templates).get("developer").orElseThrow();
+        assertThat(developer.name()).isEqualTo("Developer");
+        assertThat(developer.image()).isEqualTo("bobcrew/bob-java-python:latest");
+        // names the server accepts (it refuses BOB_*, BOBCREW_*, LD_*, PATH, HOME and the like)
+        assertThat(developer.env()).containsExactly("GH_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL");
+        assertThat(developer.prompt()).contains("unit tests", "subagent", "PROJ-123:");
+    }
+
+    @Test
+    void ignoresAnInvalidImageName() throws Exception {
+        Files.writeString(directory.resolve("odd.md"), "---\nimage: \"not an image; rm -rf /\"\n---\nGo.\n");
+        assertThat(registry().get("odd").orElseThrow().image()).isNull();
     }
 
     @Test

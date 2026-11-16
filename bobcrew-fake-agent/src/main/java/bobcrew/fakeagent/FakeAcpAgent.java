@@ -27,6 +27,10 @@ import tools.jackson.databind.node.ObjectNode;
  * <li>{@code slow}: stream chunks for up to 60 seconds, until cancelled</li>
  * <li>{@code unknown}: send a session update of a kind no client knows</li>
  * <li>{@code crash}: exit abruptly in the middle of the turn</li>
+ * <li>{@code whoami}: report the user name, uid and working directory the agent runs with</li>
+ * <li>{@code showenv NAME}: report the value of environment variable NAME, or that it is unset</li>
+ * <li>{@code writefile}: write {@code out/hello.txt} under the working directory</li>
+ * <li>{@code makelink}: create {@code out/link}, a symbolic link to {@code /etc/passwd}</li>
  * <li>anything else: think, then echo the prompt back word by word</li>
  * </ul>
  */
@@ -156,6 +160,29 @@ public final class FakeAcpAgent {
             out.flush();
             Runtime.getRuntime().halt(3);
         }
+        if (lower.contains("whoami")) {
+            chunk(sessionId, "agent_message_chunk", "user=" + System.getProperty("user.name") + " uid=" + uid()
+                    + " cwd=" + System.getProperty("user.dir") + " ");
+        }
+        int showenv = lower.indexOf("showenv ");
+        if (showenv >= 0) {
+            String name = prompt.substring(showenv + "showenv ".length()).strip().split("\\s+")[0];
+            String value = System.getenv(name);
+            chunk(sessionId, "agent_message_chunk", value == null ? "env " + name + " is unset " : "env " + name + "=" + value + " ");
+        }
+        if (lower.contains("writefile")) {
+            java.nio.file.Path file = java.nio.file.Path.of("out", "hello.txt");
+            java.nio.file.Files.createDirectories(file.getParent());
+            java.nio.file.Files.writeString(file, "hello from the fake agent");
+            chunk(sessionId, "agent_message_chunk", "wrote " + file.toAbsolutePath() + " ");
+        }
+        if (lower.contains("makelink")) {
+            java.nio.file.Path link = java.nio.file.Path.of("out", "link");
+            java.nio.file.Files.createDirectories(link.getParent());
+            java.nio.file.Files.deleteIfExists(link);
+            java.nio.file.Files.createSymbolicLink(link, java.nio.file.Path.of("/etc/passwd"));
+            chunk(sessionId, "agent_message_chunk", "linked " + link.toAbsolutePath() + " ");
+        }
         if (lower.contains("unknown")) {
             ObjectNode update = JSON.createObjectNode();
             update.put("sessionUpdate", "fake_future_update");
@@ -252,6 +279,20 @@ public final class FakeAcpAgent {
             return null;
         }
         return "Tool rejected with option " + optionId + ". ";
+    }
+
+    /** The real uid, from /proc on Linux; "?" elsewhere. */
+    private static String uid() {
+        try {
+            for (String line : java.nio.file.Files.readAllLines(java.nio.file.Path.of("/proc/self/status"))) {
+                if (line.startsWith("Uid:")) {
+                    return line.substring(4).strip().split("\\s+")[0];
+                }
+            }
+        } catch (Exception e) {
+            // not Linux
+        }
+        return "?";
     }
 
     private static ObjectNode stopReason(String reason) {

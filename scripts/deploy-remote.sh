@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Copies bobcrew-server to a remote machine over ssh and (re)starts it there with nohup, using the
-# wider settings of start-server-wide.sh (inherited environment, --auto-approve, --trust, MCP and
-# subagents).
+# wider settings of start-server-wide.sh (--auto-approve, --trust, MCP and subagents).
 #
 #   scripts/deploy-remote.sh [-i identity-file] user@host [--stop]
 #
-# The remote machine needs Java 21, openssl and the `bob` command. Run `mvn install -DskipTests`
-# first.
+# The remote machine needs Java 21, openssl and Docker, and the remote user must be able to run
+# docker (docker group). Sessions run in containers from images that must already be on the remote
+# Docker: copy them with scripts/push-images.sh (the server never pulls). Run
+# `mvn install -DskipTests` first.
 #
 # The server is reached directly at https://host:8443, so that port must be open in the remote
 # machine's firewall. It listens on one address, never on all interfaces: the address you give as
@@ -19,10 +20,10 @@
 # machine, never to a command line. Otherwise an existing server.env is kept.
 #
 # Files on the remote machine, under $BOBCREW_REMOTE_DIR (default ~/bobcrew): server.log,
-# server.pid, server.env, certs/ (CA, server certificate, JWT secret), workspaces/.
+# server.pid, server.env, certs/ (CA, server certificate, JWT secret).
 #
-# The agent inherits the environment of a remote *login* shell (~/.profile and the like), not of
-# an interactive one (~/.bashrc), so put things such as GH_TOKEN where a login shell reads them.
+# The agents do not see the remote machine's environment: variables such as GH_TOKEN come from the
+# machine running the UI, as listed by the session's role.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -68,7 +69,10 @@ jar=$(ls bobcrew-server/target/bobcrew-server-*-SNAPSHOT.jar 2>/dev/null | head 
 echo "checking $TARGET"
 rssh bash -l -s <<'EOF'
 command -v openssl >/dev/null || { echo "error: openssl not found on the remote machine" >&2; exit 1; }
-command -v bob >/dev/null || { echo "error: bob not found on the remote machine" >&2; exit 1; }
+command -v docker >/dev/null || { echo "error: docker not found on the remote machine" >&2; exit 1; }
+docker info >/dev/null 2>&1 || { echo "error: this user cannot use docker on the remote machine (docker group?)" >&2; exit 1; }
+docker image inspect bobcrew/bob-base:latest >/dev/null 2>&1 \
+  || echo "warning: bobcrew/bob-base:latest is not on the remote Docker; copy it with scripts/push-images.sh" >&2
 command -v java >/dev/null || { echo "error: java not found on the remote machine" >&2; exit 1; }
 v=$(java -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java.specification.version = \([0-9]*\).*/\1/p')
 [ "${v:-0}" -ge 21 ] || { echo "error: Java 21 or newer is needed on the remote machine (found ${v:-none})" >&2; exit 1; }
@@ -78,7 +82,7 @@ EOF
 rssh bash -l -s -- "$REMOTE_DIR" <<<"$STOP_SNIPPET"
 
 echo "copying files"
-rssh "mkdir -p '$REMOTE_DIR/bobcrew-server/target' '$REMOTE_DIR/scripts' '$REMOTE_DIR/workspaces'"
+rssh "mkdir -p '$REMOTE_DIR/bobcrew-server/target' '$REMOTE_DIR/scripts'"
 rscp "$jar" "$TARGET:$REMOTE_DIR/bobcrew-server/target/"
 rscp scripts/gen-dev-certs.sh scripts/start-server-wide.sh "$TARGET:$REMOTE_DIR/scripts/"
 

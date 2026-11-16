@@ -22,8 +22,6 @@ bobcrew:
   tls:
     certificate: ${BOBCREW_TLS_CERT:file:certs/server.crt}
     private-key: ${BOBCREW_TLS_KEY:file:certs/server.key}
-  # Directory under which every session workspace must live
-  workspace-root: ${BOBCREW_WORKSPACE_ROOT:${user.dir}/workspaces}
   max-sessions: 8
   # How long initialize, session/new and other short requests may take
   request-timeout: 30s
@@ -38,11 +36,35 @@ bobcrew:
   # Whether clients may download files from a session's workspace
   file-downloads-enabled: ${BOBCREW_FILE_DOWNLOADS_ENABLED:false}
   agent:
-    binary: ${BOB_PATH:bob}
-    arguments: ${BOB_ARGUMENTS:acp,--trust,--accept-license,--disable-mcp,--disable-subagents}
+    # The command run in each session's container (the image's entrypoint runs it). It must speak
+    # ACP on stdin/stdout. --auto-approve is deliberately absent: users answer permission requests.
+    command: ${BOBCREW_AGENT_COMMAND:bob,acp,--trust,--accept-license,--disable-mcp,--disable-subagents}
+    # Passed to the container as BOB_API_KEY and BOBSHELL_API_KEY; never logged
     api-key: ${BOB_API_KEY:}
-    # false: the agent gets only HOME, LOGNAME, PATH, SHELL, TERM, USER and the API key
-    inherit-environment: false
+  docker:
+    # The Docker daemon; the server's user must be allowed to use it
+    host: ${DOCKER_HOST:unix:///var/run/docker.sock}
+    # Docker Engine API version to speak (Docker 29 accepts 1.44 and newer)
+    api-version: ${BOBCREW_DOCKER_API_VERSION:1.44}
+    # Labels this server's containers; containers with this id left by an earlier run are removed
+    # at startup. Servers sharing one Docker daemon need different ids.
+    instance-id: ${BOBCREW_INSTANCE_ID:default}
+    # Image used when the client names none. Images are never pulled: they must be present on the
+    # Docker host (scripts/build-images.sh, scripts/push-images.sh).
+    default-image: ${BOBCREW_DEFAULT_IMAGE:bobcrew/bob-base:latest}
+    # uid:gid the agent runs as; never root
+    user: "1000:1000"
+    # Per-container resource limits
+    memory-limit: 4GB
+    cpus: 2
+    pids-limit: 1024
+    # Docker network the containers join; the agent needs to reach its model API
+    network: bridge
+    # How long a container gets to exit after its input is closed, before it is killed
+    stop-timeout: 5s
+    # Limits on the environment variables a client may pass to a session
+    max-env-vars: 32
+    max-env-value-length: 32768
   auth:
     jwt-secret-file: ${BOBCREW_JWT_SECRET_FILE:}
     revoked-jti-file: ${BOBCREW_REVOKED_JTI_FILE:}
