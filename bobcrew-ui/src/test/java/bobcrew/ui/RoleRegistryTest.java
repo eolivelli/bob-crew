@@ -50,6 +50,15 @@ class RoleRegistryTest {
         // names the server accepts (it refuses BOB_*, BOBCREW_*, LD_*, PATH, HOME and the like)
         assertThat(developer.env()).containsExactly("GH_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL");
         assertThat(developer.prompt()).contains("unit tests", "subagent", "PROJ-123:");
+        assertThat(developer.capabilities()).isEmpty();
+
+        RoleRegistry.Role power = new RoleRegistry(templates).get("power-user").orElseThrow();
+        assertThat(power.name()).isEqualTo("Power User");
+        assertThat(power.image()).isEqualTo("bobcrew/bob-power:latest");
+        assertThat(power.capabilities()).containsExactly("docker", "libvirt");
+        assertThat(power.memory()).isEqualTo("16GB");
+        assertThat(power.cpus()).isEqualTo(4.0);
+        assertThat(power.prompt()).contains("Docker", "Vagrant", "libvirt");
     }
 
     @Test
@@ -73,6 +82,25 @@ class RoleRegistryTest {
         }
         assertThat(RoleRegistry.parse("c", "---\nrepository: https://github.com/a/b\nbranch: --upload-pack=x\n---\nGo.\n")
             .branch()).isNull();
+    }
+
+    @Test
+    void readsCapabilitiesAndResources() {
+        RoleRegistry.Role role = RoleRegistry.parse("p",
+                "---\ncapabilities: Docker, libvirt docker root\nmemory: 16 gb\ncpus: 2.5\n---\nGo.\n");
+        assertThat(role.capabilities()).as("known ones, once each").containsExactly("docker", "libvirt");
+        assertThat(role.memory()).isEqualTo("16GB");
+        assertThat(role.cpus()).isEqualTo(2.5);
+
+        RoleRegistry.Role plain = RoleRegistry.parse("p", "Go.\n");
+        assertThat(plain.capabilities()).isEmpty();
+        assertThat(plain.memory()).isNull();
+        assertThat(plain.cpus()).isNull();
+
+        RoleRegistry.Role bad = RoleRegistry.parse("p", "---\nmemory: a lot\ncpus: -1\n---\nGo.\n");
+        assertThat(bad.memory()).isNull();
+        assertThat(bad.cpus()).isNull();
+        assertThat(RoleRegistry.parse("p", "---\ncpus: many\n---\nGo.\n").cpus()).isNull();
     }
 
     @Test

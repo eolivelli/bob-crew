@@ -88,6 +88,8 @@ class ServerIntegrationTest {
         registry.add("bobcrew.permission-timeout", () -> "2s");
         registry.add("bobcrew.agent.api-key", () -> API_KEY);
         registry.add("bobcrew.max-upload-size", () -> "1MB");
+        registry.add("bobcrew.docker.max-memory", () -> "1GB");
+        registry.add("bobcrew.docker.max-cpus", () -> "2");
     }
 
     @LocalServerPort
@@ -345,6 +347,36 @@ class ServerIntegrationTest {
         extra.removeAll(imageEnv);
         assertThat(extra.stream().map(entry -> entry.substring(0, entry.indexOf('='))))
             .containsExactlyInAnyOrder("TEST_MARKER", "GH_TOKEN", "BOB_API_KEY", "BOBSHELL_API_KEY", "BOBCREW_SESSION_ID");
+    }
+
+    @Test
+    void refusesCapabilitiesUnlessTheServerAllowsThem() throws Exception {
+        JsonNode me = JSON.readTree(send("GET", "/me", null, alice).body());
+        assertThat(me.get("capabilities")).isEmpty();
+        assertThat(me.get("maxMemoryBytes").asLong()).isEqualTo(1024L * 1024 * 1024);
+        assertThat(me.get("maxCpus").asDouble()).isEqualTo(2.0);
+        HttpResponse<String> response = send("POST", "/sessions", "{\"capabilities\":[\"docker\"]}", alice);
+        assertThat(response.statusCode()).isEqualTo(403);
+        assertThat(response.body()).contains("does not allow the docker capability");
+        assertThat(createStatus(Map.of("capabilities", List.of("root")))).isEqualTo(400);
+        assertThat(TestDocker.client().listContainersCmd().withShowAll(true)
+            .withLabelFilter(Map.of(DockerRuntime.LABEL_INSTANCE, instanceId)).exec()).isEmpty();
+    }
+
+    @Test
+    void appliesTheResourcesASessionAsksForWithinTheServersCaps() throws Exception {
+        JsonNode session = create(Map.of("resources", Map.of("memory", "256MB", "cpus", 0.5)));
+        assertThat(session.get("resources").get("memoryBytes").asLong()).isEqualTo(256L * 1024 * 1024);
+        assertThat(session.get("resources").get("cpus").asDouble()).isEqualTo(0.5);
+        InspectContainerResponse container = TestDocker.client()
+            .inspectContainerCmd(session.get("containerId").asString()).exec();
+        assertThat(container.getHostConfig().getMemory()).isEqualTo(256L * 1024 * 1024);
+        assertThat(container.getHostConfig().getNanoCPUs()).isEqualTo(500_000_000L);
+
+        for (Map<String, Object> bad : List.<Map<String, Object>>of(Map.of("memory", "2GB"), Map.of("memory", "lots"),
+                Map.of("memory", "1MB"), Map.of("cpus", 3), Map.of("cpus", 0), Map.of("cpus", -1))) {
+            assertThat(createStatus(Map.of("resources", bad))).as(bad.toString()).isEqualTo(400);
+        }
     }
 
     @Test

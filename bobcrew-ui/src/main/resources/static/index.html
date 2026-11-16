@@ -19,6 +19,26 @@
     <select id="new-server" required title="Server"></select>
     <input id="new-title" placeholder="Title (optional)" maxlength="200" autocomplete="off">
     <select id="new-role" title="Role: the session's image, environment and first prompt" hidden></select>
+    <details id="new-options">
+      <summary>Options</summary>
+      <label id="cap-docker-label" class="check" hidden
+        title="A Docker Engine of the session's own (the image must have it, as bobcrew/bob-power does). Makes the container privileged: whoever uses the session can become root on the server.">
+        <input id="cap-docker" type="checkbox" value="docker"> Docker
+      </label>
+      <label id="cap-libvirt-label" class="check" hidden
+        title="Virtual machines with libvirt and QEMU/KVM, for Vagrant (the image must have them, as bobcrew/bob-power does). Makes the container privileged: whoever uses the session can become root on the server.">
+        <input id="cap-libvirt" type="checkbox" value="libvirt"> Virtual machines (libvirt)
+      </label>
+      <label class="field">Memory
+        <input id="new-memory" placeholder="no limit" maxlength="12" autocomplete="off"
+          pattern="[0-9]+ ?([KMGT]?B|[kmgt]?b)" title="Such as 8GB or 512MB; empty for the server's default">
+      </label>
+      <label class="field">CPUs
+        <input id="new-cpus" type="number" min="0.1" step="0.1" placeholder="no limit"
+          title="Such as 2 or 0.5; empty for the server's default">
+      </label>
+      <p id="new-limits" class="hint"></p>
+    </details>
     <button type="submit">New session</button>
   </form>
   <button id="show-roles" type="button" title="List the available roles and read their manifests">Roles</button>

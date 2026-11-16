@@ -50,6 +50,12 @@ import org.springframework.stereotype.Component;
  * <p>Containers get no host directories, no host environment and no capabilities; they run as a fixed
  * non-root user. Images are never pulled: one that is not on the Docker host is refused, so what can run is
  * decided by whoever manages that host.
+ *
+ * <p>The exception is a session with {@link Capabilities} (allowed by the server, and asked for at creation),
+ * whose agent runs Docker or virtual machines of its own: its container is privileged and starts as root, so
+ * that the image's entrypoint can start the daemons named in {@code BOBCREW_CAPABILITIES}, and gets
+ * {@code BOBCREW_AGENT_USER} to drop to before the agent starts. Whoever drives such a session can become root
+ * on the Docker host.
  */
 @Component
 class DockerRuntime implements Closeable {
@@ -65,6 +71,8 @@ class DockerRuntime implements Closeable {
 
     static final String LABEL_OWNER = "bobcrew.owner";
 
+    static final String LABEL_CAPABILITIES = "bobcrew.capabilities";
+
     private static final Pattern IMAGE = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}");
 
     private static final Pattern INSTANCE_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,62}");
@@ -72,13 +80,19 @@ class DockerRuntime implements Closeable {
     private static final Logger log = LoggerFactory.getLogger(DockerRuntime.class);
 
     /** What a session's container is made of. */
-    record ContainerSpec(String sessionId, String owner, String image, Map<String, String> env) {
+    record ContainerSpec(String sessionId, String owner, String image, Map<String, String> env,
+            List<String> capabilities, Resources resources) {
+
+        /** Any capability needs a privileged container. */
+        boolean privileged() {
+            return !capabilities.isEmpty();
+        }
 
         @Override
         public String toString() {
             // the values may be secrets: names only
             return "ContainerSpec[session=" + sessionId + ", owner=" + owner + ", image=" + image + ", env="
-                    + env.keySet() + "]";
+                    + env.keySet() + ", capabilities=" + capabilities + ", resources=" + resources + "]";
         }
     }
 
@@ -128,6 +142,11 @@ class DockerRuntime implements Closeable {
         }
         log.info("Docker daemon at {} (instance id {}, default image {})", settings.host(), settings.instanceId(),
                 settings.defaultImage());
+        List<String> capabilities = Capabilities.allowed(properties.allowedCapabilities());
+        if (!capabilities.isEmpty()) {
+            log.warn("Sessions may ask for {}: their containers are privileged, and their users can become root on "
+                    + "this Docker host", capabilities);
+        }
         removeOrphans();
     }
 
@@ -153,6 +172,7 @@ class DockerRuntime implements Closeable {
 
     /**
      * Creates (but does not start) the container for a session.
+     * {@code spec}'s capabilities and resources must already be checked ({@link Capabilities}, {@link Resources}).
      * @throws ApiException 400 if the image is not on the Docker host, 502 if Docker refuses
      */
     String create(ContainerSpec spec) {
@@ -179,20 +199,38 @@ class DockerRuntime implements Closeable {
         labels.put(LABEL_OWNER, spec.owner());
         HostConfig host = HostConfig.newHostConfig()
             .withInit(true)
-            .withCapDrop(Capability.ALL)
-            .withSecurityOpts(List.of("no-new-privileges"))
-            .withMemory(settings.memoryLimit().toBytes())
-            .withNanoCPUs((long) (settings.cpus() * 1_000_000_000L))
-            .withPidsLimit(settings.pidsLimit())
             .withNetworkMode(settings.network())
             .withAutoRemove(false);
+        if (spec.resources().memoryBytes() != null) {
+            host.withMemory(spec.resources().memoryBytes());
+        }
+        if (spec.resources().cpus() != null) {
+            host.withNanoCPUs(Math.round(spec.resources().cpus() * 1_000_000_000L));
+        }
+        if (settings.pidsLimit() > 0) {
+            host.withPidsLimit(settings.pidsLimit());
+        }
+        String user;
+        if (spec.privileged()) {
+            // root only until the entrypoint has started the image's daemons; it then runs the agent as
+            // BOBCREW_AGENT_USER (and refuses to start without it)
+            user = "0:0";
+            env.add("BOBCREW_AGENT_USER=" + settings.user());
+            env.add("BOBCREW_CAPABILITIES=" + String.join(",", spec.capabilities()));
+            labels.put(LABEL_CAPABILITIES, String.join(",", spec.capabilities()));
+            host.withPrivileged(true);
+        } else {
+            user = settings.user();
+            host.withCapDrop(Capability.ALL)
+                .withSecurityOpts(List.of("no-new-privileges"));
+        }
         try {
             CreateContainerResponse created = client.createContainerCmd(spec.image())
                 .withName("bobcrew-" + settings.instanceId() + "-" + spec.sessionId())
                 .withCmd(agent.command())
                 .withEnv(env)
                 .withLabels(labels)
-                .withUser(settings.user())
+                .withUser(user)
                 .withWorkingDir(WORKSPACE)
                 .withTty(false)
                 .withAttachStdin(true)
@@ -265,11 +303,14 @@ class DockerRuntime implements Closeable {
     /**
      * Deletes everything inside the container's workspace, hidden files included, and keeps the directory.
      * {@code rm} removes symbolic links without following them.
+     * @param asRoot run as the container's root rather than the session's user: in privileged sessions, the
+     * agent's own containers leave files owned by root in the workspace, and root there gains nothing
      * @throws ApiException 500 if the command fails
      */
-    void wipeWorkspace(String containerId) {
-        int exit = exec(containerId, Duration.ofMinutes(2), "sh", "-c",
-                "rm -rf -- " + WORKSPACE + "/* " + WORKSPACE + "/.[!.]* " + WORKSPACE + "/..?*");
+    void wipeWorkspace(String containerId, boolean asRoot) {
+        int exit = exec(containerId, Duration.ofMinutes(2), asRoot ? "0:0" : settings.user(), null, List.of(),
+                List.of("sh", "-c", "rm -rf -- " + WORKSPACE + "/* " + WORKSPACE + "/.[!.]* " + WORKSPACE + "/..?*"))
+            .exitCode();
         if (exit != 0) {
             log.warn("Wiping the workspace of container {} exited with {}", shortId(containerId), exit);
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
@@ -281,23 +322,19 @@ class DockerRuntime implements Closeable {
     record ExecResult(int exitCode, String output) {
     }
 
-    private int exec(String containerId, Duration timeout, String... command) {
-        return exec(containerId, timeout, null, List.of(), List.of(command)).exitCode();
-    }
-
     /**
-     * Runs a command in the container as the session's user and waits for it.
+     * Runs a command in the container as {@code user} and waits for it.
      * @param stdin written to the command's standard input, or null for none. docker-java never closes the
      * command's input when this stream ends, so the command must know by itself how much to read
      * @param env extra environment variables, {@code NAME=value}
      */
-    private ExecResult exec(String containerId, Duration timeout, InputStream stdin, List<String> env,
+    private ExecResult exec(String containerId, Duration timeout, String user, InputStream stdin, List<String> env,
             List<String> command) {
         OutputTail output = new OutputTail(4096);
         try {
             ExecCreateCmdResponse exec = client.execCreateCmd(containerId)
                 .withCmd(command.toArray(String[]::new))
-                .withUser(settings.user())
+                .withUser(user)
                 .withWorkingDir(WORKSPACE)
                 .withEnv(env)
                 .withAttachStdin(stdin != null)
@@ -388,7 +425,7 @@ class DockerRuntime implements Closeable {
                 head -c "$2" > "$1" || exit 6
                 [ "$(wc -c < "$1")" -eq "$2" ] || exit 7
                 """;
-        ExecResult result = exec(containerId, timeout, content, List.of(),
+        ExecResult result = exec(containerId, timeout, settings.user(), content, List.of(),
                 List.of("sh", "-c", script, "bobcrew-upload", path, Long.toString(size)));
         switch (result.exitCode()) {
             case 0 -> {
@@ -421,7 +458,7 @@ class DockerRuntime implements Closeable {
             command.addAll(List.of("--branch", repository.branch()));
         }
         command.addAll(List.of("--", repository.url(), repository.path()));
-        ExecResult result = exec(containerId, timeout, null, List.of("GIT_TERMINAL_PROMPT=0"), command);
+        ExecResult result = exec(containerId, timeout, settings.user(), null, List.of("GIT_TERMINAL_PROMPT=0"), command);
         if (result.exitCode() != 0) {
             log.warn("Cloning {} in container {} exited with {}: {}", repository.url(), shortId(containerId),
                     result.exitCode(), result.output().strip());

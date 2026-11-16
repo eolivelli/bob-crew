@@ -28,7 +28,12 @@ import org.springframework.stereotype.Component;
  * passes from its own environment to the session's container (never to the browser);</li>
  * <li>{@code repository}, {@code branch}: an https git repository that the server clones (shallow, that branch
  * only, or the default branch when none is given) into the workspace before the agent starts; the first prompt
- * then tells the agent where it is.</li>
+ * then tells the agent where it is;</li>
+ * <li>{@code capabilities}: what the agent may run besides commands, separated by commas or spaces:
+ * {@code docker} (a Docker Engine of its own), {@code libvirt} (virtual machines, for Vagrant); the image must
+ * have them (bobcrew/bob-power does) and the server must allow them;</li>
+ * <li>{@code memory} (such as {@code 8GB}), {@code cpus} (such as {@code 2} or {@code 0.5}): the resources the
+ * session's container asks for; without them, the server's defaults (by default no limit).</li>
  * </ul>
  *
  * <p>The directory is read on every call so that edits show up without restarting the UI. Role ids come from
@@ -42,10 +47,12 @@ class RoleRegistry {
     /**
      * A role as shown to the user. {@code manifest} is the file as written, {@code prompt} its body; {@code image}
      * is null when the role names none, {@code env} holds variable names only; {@code repository} and
-     * {@code branch} are null when not given.
+     * {@code branch} are null when not given; {@code capabilities} lists the capabilities asked for
+     * (possibly none); {@code memory} and {@code cpus} are null when not given.
      */
     record Role(String id, String name, String description, String prompt, String manifest, String image,
-            List<String> env, String repository, String branch) {
+            List<String> env, String repository, String branch, List<String> capabilities, String memory,
+            Double cpus) {
     }
 
     static final Pattern ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,99}");
@@ -55,6 +62,12 @@ class RoleRegistry {
 
     /** A repository URL: https, no credentials, no spaces; the server checks it fully. */
     static final Pattern REPOSITORY = Pattern.compile("https://[^\\s@?#]{1,2000}");
+
+    /** The capabilities a role may ask for; the server decides whether they are allowed. */
+    static final List<String> CAPABILITIES = List.of("docker", "libvirt");
+
+    /** A memory size as the server reads it: a whole number and a unit. */
+    static final Pattern MEMORY = Pattern.compile("[0-9]{1,9}(B|KB|MB|GB|TB)");
 
     /** A branch name; the server checks it fully. */
     static final Pattern BRANCH = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._/+-]{0,199}");
@@ -143,6 +156,9 @@ class RoleRegistry {
         String image = null;
         String repository = null;
         String branch = null;
+        List<String> capabilities = new ArrayList<>();
+        String memory = null;
+        Double cpus = null;
         List<String> env = new ArrayList<>();
         String body = text;
 
@@ -185,6 +201,37 @@ class RoleRegistry {
                         } else {
                             log.warn("Role {}: ignoring the invalid branch name", id);
                         }
+                    } else if (key.equals("capabilities")) {
+                        for (String capability : value.toLowerCase().split("[,\\s]+")) {
+                            if (capability.isEmpty()) {
+                                continue;
+                            }
+                            if (CAPABILITIES.contains(capability)) {
+                                if (!capabilities.contains(capability)) {
+                                    capabilities.add(capability);
+                                }
+                            } else {
+                                log.warn("Role {}: ignoring the unknown capability {}", id, capability);
+                            }
+                        }
+                    } else if (key.equals("memory")) {
+                        String size = value.replace(" ", "").toUpperCase();
+                        if (MEMORY.matcher(size).matches()) {
+                            memory = size;
+                        } else {
+                            log.warn("Role {}: ignoring memory, which must be a size such as 8GB or 512MB", id);
+                        }
+                    } else if (key.equals("cpus")) {
+                        try {
+                            double parsed = Double.parseDouble(value);
+                            if (parsed > 0 && parsed <= 1024) {
+                                cpus = parsed;
+                            } else {
+                                log.warn("Role {}: ignoring cpus, which must be more than 0", id);
+                            }
+                        } catch (NumberFormatException e) {
+                            log.warn("Role {}: ignoring cpus, which must be a number such as 2 or 0.5", id);
+                        }
                     } else if (key.equals("env")) {
                         for (String variable : value.split("[,\\s]+")) {
                             if (variable.isEmpty()) {
@@ -213,7 +260,7 @@ class RoleRegistry {
             branch = null;
         }
         return new Role(id, name == null || name.isBlank() ? id : name, description, prompt, manifest, image,
-                List.copyOf(env), repository, branch);
+                List.copyOf(env), repository, branch, List.copyOf(capabilities), memory, cpus);
     }
 
     private static String unquote(String value) {

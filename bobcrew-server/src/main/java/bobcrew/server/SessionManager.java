@@ -45,11 +45,19 @@ public class SessionManager {
 
     private volatile boolean stopping;
 
+    private final List<String> allowedCapabilities;
+
     SessionManager(BobCrewProperties properties, DockerRuntime docker, SessionAccessPolicy accessPolicy) {
         this.properties = properties;
         this.docker = docker;
         this.accessPolicy = accessPolicy;
+        this.allowedCapabilities = Capabilities.allowed(properties.allowedCapabilities());
         log.info("Agent: {}", properties.agent());
+    }
+
+    /** The capabilities sessions may ask for on this server. */
+    List<String> allowedCapabilities() {
+        return allowedCapabilities;
     }
 
     /**
@@ -58,14 +66,19 @@ public class SessionManager {
      * @param env environment variables for the container; nothing else from the client or the server's own
      * environment gets in (the server adds the API key)
      * @param repository cloned into the workspace before the agent's session starts, or null
-     * @throws ApiException 400 for a bad image, environment or repository, 429 when the server is full, 502 if the
-     * agent fails
+     * @param capabilities what the agent may run besides commands ({@link Capabilities}); null or empty for none
+     * @param resources the container's limits, already checked ({@link Resources#of})
+     * @throws ApiException 400 for a bad image, environment, repository or capability, 403 for a capability the
+     * server does not allow, 429 when the server is full, 502 if the agent fails
      */
-    AgentSession create(String owner, String title, String image, Map<String, String> env, GitRepository repository) {
+    AgentSession create(String owner, String title, String image, Map<String, String> env, GitRepository repository,
+            List<String> capabilities, Resources resources) {
+        List<String> checkedCapabilities = Capabilities.check(capabilities, allowedCapabilities);
         String chosenImage = image == null || image.isBlank() ? docker.defaultImage() : image.strip();
         Map<String, String> checkedEnv = checkEnv(env);
         String id = UUID.randomUUID().toString();
-        AgentSession session = new AgentSession(new DockerRuntime.ContainerSpec(id, owner, chosenImage, checkedEnv),
+        AgentSession session = new AgentSession(new DockerRuntime.ContainerSpec(id, owner, chosenImage, checkedEnv,
+                checkedCapabilities, resources),
                 repository, title == null || title.isBlank() ? chosenImage : title.strip(), docker, properties);
         synchronized (this) {
             if (stopping) {
@@ -85,7 +98,11 @@ public class SessionManager {
             throw e;
         }
         log.info("Session {} created by {} with image {}, environment {}{}", session.id(), owner, chosenImage,
-                checkedEnv.keySet(), repository == null ? "" : ", repository " + repository.url());
+                checkedEnv.keySet(), (repository == null ? "" : ", repository " + repository.url())
+                        + (checkedCapabilities.isEmpty() ? "" : ", capabilities " + checkedCapabilities
+                                + " (privileged)")
+                        + ", memory " + (resources.memoryBytes() == null ? "unlimited" : resources.memoryBytes() + " bytes")
+                        + ", cpus " + (resources.cpus() == null ? "unlimited" : resources.cpus()));
         return session;
     }
 

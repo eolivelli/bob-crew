@@ -22,6 +22,7 @@ public record BobCrewProperties(
         @DefaultValue Agent agent,
         @DefaultValue Docker docker,
         @DefaultValue Git git,
+        List<String> allowedCapabilities,
         @DefaultValue Auth auth) {
 
     /** What runs inside a session's container. */
@@ -45,9 +46,11 @@ public record BobCrewProperties(
             @DefaultValue("default") String instanceId,
             @DefaultValue("bobcrew/bob-base:latest") String defaultImage,
             @DefaultValue("1000:1000") String user,
-            @DefaultValue("4GB") DataSize memoryLimit,
-            @DefaultValue("2") double cpus,
-            @DefaultValue("1024") long pidsLimit,
+            DataSize memoryLimit,
+            @DefaultValue("0") double cpus,
+            @DefaultValue("0") long pidsLimit,
+            DataSize maxMemory,
+            @DefaultValue("0") double maxCpus,
             @DefaultValue("bridge") String network,
             @DefaultValue("5s") Duration stopTimeout,
             @DefaultValue("32") int maxEnvVars,

@@ -8,7 +8,8 @@ const $ = (id) => document.getElementById(id);
 const state = {
   user: '',             // who this UI is signed in as
   servers: [],          // list of configured servers [{name, url}]
-  roles: [],            // available roles [{id, name, description, image, env}]
+  roles: [],            // available roles [{id, name, description, image, env, repository, branch, capabilities, memory, cpus}]
+  serverLimits: new Map(), // server name -> {capabilities, maxMemoryBytes, maxCpus} from its /me
   metricsTimer: null,   // refreshes the metrics panel while it is open
   uploading: false,     // an upload is in progress
   sessions: [],
@@ -111,13 +112,66 @@ async function refreshRoles() {
     option.value = role.id;
     option.title = [role.description, role.image ? 'image ' + role.image : '',
       role.env && role.env.length ? 'env ' + role.env.join(', ') : '',
-      role.repository ? 'clones ' + role.repository + (role.branch ? ' (' + role.branch + ')' : '') : '']
+      role.repository ? 'clones ' + role.repository + (role.branch ? ' (' + role.branch + ')' : '') : '',
+      role.capabilities && role.capabilities.length ? 'capabilities ' + role.capabilities.join(', ') : '',
+      role.memory ? 'memory ' + role.memory : '', role.cpus ? role.cpus + ' CPUs' : '']
       .filter(Boolean).join(' · ');
     return option;
   }));
   if (state.roles.some((role) => role.id === prev)) dropdown.value = prev;
   dropdown.hidden = !state.roles.length;
+  updateOptions(true);
 }
+
+const CAPABILITIES = ['docker', 'libvirt'];
+
+// Asks the selected server what sessions may ask for (once per server).
+async function refreshServerLimits() {
+  const server = $('new-server').value;
+  if (!state.serverLimits.has(server)) {
+    try {
+      const me = await api('GET', server ? `/servers/${encodeURIComponent(server)}/me` : '/me');
+      state.serverLimits.set(server, {
+        capabilities: (me && me.capabilities) || [],
+        maxMemoryBytes: me ? me.maxMemoryBytes : null,
+        maxCpus: me ? me.maxCpus : null,
+      });
+    } catch (e) {
+      state.serverLimits.set(server, { capabilities: [], maxMemoryBytes: null, maxCpus: null });
+    }
+  }
+  updateOptions(false);
+}
+
+// A capability box shows when the server allows it or the role asks for it; the role's ones are ticked and
+// locked. With roleChanged, the memory and CPU fields take the role's values.
+function updateOptions(roleChanged) {
+  const limits = state.serverLimits.get($('new-server').value) || { capabilities: [] };
+  const role = state.roles.find((r) => r.id === $('new-role').value);
+  const fromRole = (role && role.capabilities) || [];
+  for (const name of CAPABILITIES) {
+    const box = $(`cap-${name}`);
+    $(`cap-${name}-label`).hidden = !limits.capabilities.includes(name) && !fromRole.includes(name);
+    if (fromRole.includes(name)) {
+      box.checked = true;
+      box.disabled = true;
+    } else {
+      if (box.disabled) box.checked = false;
+      box.disabled = false;
+    }
+  }
+  if (roleChanged) {
+    $('new-memory').value = (role && role.memory) || '';
+    $('new-cpus').value = (role && role.cpus) || '';
+    if (fromRole.length) $('new-options').open = true;
+  }
+  const caps = [limits.maxMemoryBytes ? `memory up to ${formatBytes(limits.maxMemoryBytes)}` : '',
+    limits.maxCpus ? `up to ${limits.maxCpus} CPUs` : ''].filter(Boolean);
+  $('new-limits').textContent = caps.length ? `This server allows ${caps.join(' and ')}.` : '';
+}
+
+$('new-server').addEventListener('change', () => refreshServerLimits());
+$('new-role').addEventListener('change', () => updateOptions(true));
 
 async function refreshSessions() {
   try {
@@ -155,7 +209,8 @@ async function refreshSessions() {
       const isSelected = session.id === state.current || (session.server && `${session.server}:${session.id}` === state.current);
       const item = el('li', isSelected ? 'selected' : '');
       item.append(el('span', 'name', session.title),
-        el('span', 'sub', `${session.status.toLowerCase()} · ${session.owner} · ${session.image}`));
+        el('span', 'sub', `${session.status.toLowerCase()} · ${session.owner} · ${session.image}`
+          + (session.capabilities && session.capabilities.length ? ` · ${session.capabilities.join(', ')}` : '')));
       item.addEventListener('click', () => select(session.id, session.server));
       list.append(item);
     }
@@ -170,6 +225,8 @@ function showHeader(session) {
   const serverInfo = session.server ? ` · server ${session.server}` : '';
   $('session-meta').textContent =
     `${session.agent || 'agent'}${serverInfo} · image ${session.image}`
+    + (session.capabilities && session.capabilities.length ? ` · capabilities ${session.capabilities.join(', ')}` : '')
+    + (session.resources ? ` · ${resourcesText(session.resources)}` : '')
     + (session.repository ? ` · repository ${session.repository.url}`
       + (session.repository.branch ? ` (${session.repository.branch})` : '') : '')
     + `${session.containerId ? ' · container ' + session.containerId : ''} · owner ${session.owner}`;
@@ -441,8 +498,16 @@ $('new-session').addEventListener('submit', async (submit) => {
     button.textContent = role && role.repository ? 'Cloning the repository…' : 'Starting…';
     const createPath = server ? `/servers/${encodeURIComponent(server)}/sessions` : '/sessions';
     // the UI app turns the role into the image and environment variables; their values never come here
-    const response = await call('POST', createPath,
-      { title: $('new-title').value.trim() || (role ? role.name : ''), ...(role ? { role: role.id } : {}) });
+    const capabilities = CAPABILITIES.filter((name) => $(`cap-${name}`).checked && !$(`cap-${name}-label`).hidden);
+    const memory = $('new-memory').value.replace(/\s+/g, '').toUpperCase();
+    const cpus = $('new-cpus').value ? Number($('new-cpus').value) : null;
+    const resources = { ...(memory ? { memory } : {}), ...(cpus ? { cpus } : {}) };
+    const response = await call('POST', createPath, {
+      title: $('new-title').value.trim() || (role ? role.name : ''),
+      ...(role ? { role: role.id } : {}),
+      ...(capabilities.length ? { capabilities } : {}),
+      ...(Object.keys(resources).length ? { resources } : {}),
+    });
     const session = await response.json();
     if (server) session.server = server;
     const missing = response.headers.get('X-BobCrew-Missing-Env');
@@ -609,6 +674,13 @@ function formatBytes(bytes) {
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+// "8.0 GiB, 2 CPUs", or "no limits", from a session's resources.
+function resourcesText(resources) {
+  const parts = [resources.memoryBytes ? formatBytes(resources.memoryBytes) : '',
+    resources.cpus ? `${resources.cpus} CPUs` : ''].filter(Boolean);
+  return parts.length ? parts.join(', ') : 'no limits';
+}
+
 function formatDuration(seconds) {
   if (seconds === null || seconds === undefined) return 'n/a';
   const h = Math.floor(seconds / 3600);
@@ -736,7 +808,10 @@ async function showRole(id, item) {
       `Image: ${role.image || "the server's default"}`,
       `Environment passed from this computer: ${role.env && role.env.length ? role.env.join(', ') : 'none'}`,
       ...(role.repository ? [`Repository cloned into the workspace: ${role.repository}`
-        + (role.branch ? ` (branch ${role.branch})` : ' (default branch)')] : [])]
+        + (role.branch ? ` (branch ${role.branch})` : ' (default branch)')] : []),
+      ...(role.capabilities && role.capabilities.length
+        ? [`Capabilities (privileged container): ${role.capabilities.join(', ')}`] : []),
+      ...(role.memory || role.cpus ? [`Resources: ${role.memory || 'default'} memory, ${role.cpus || 'default'} CPUs`] : [])]
       .filter(Boolean).join(' · ');
     $('role-manifest').textContent = role.manifest;
   } catch (e) {
@@ -757,6 +832,7 @@ $('hide-roles').addEventListener('click', () => hideRoles());
     notify(e.message);
   }
   refreshRoles();
+  refreshServerLimits();
   await refreshSessions();
   const linked = location.hash.slice(1);
   if (linked) {

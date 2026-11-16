@@ -58,10 +58,14 @@ bobcrew:
     default-image: ${BOBCREW_DEFAULT_IMAGE:bobcrew/bob-base:latest}
     # uid:gid the agent runs as; never root
     user: "1000:1000"
-    # Per-container resource limits
-    memory-limit: 4GB
-    cpus: 2
-    pids-limit: 1024
+    # Limits for sessions that ask for none (0: no limit). A session can ask for its own memory and CPUs,
+    # up to max-memory and max-cpus (0: no cap); with no request and no default, the cap applies.
+    memory-limit: ${BOBCREW_MEMORY_LIMIT:0}
+    cpus: ${BOBCREW_CPUS:0}
+    max-memory: ${BOBCREW_MAX_MEMORY:0}
+    max-cpus: ${BOBCREW_MAX_CPUS:0}
+    # Most processes per container (0: no limit)
+    pids-limit: ${BOBCREW_PIDS_LIMIT:0}
     # Docker network the containers join; the agent needs to reach its model API
     network: bridge
     # How long a container gets to exit after its input is closed, before it is killed
@@ -74,6 +78,12 @@ bobcrew:
     clone-timeout: 10m
     # URL schemes a repository may use. URLs with credentials in them are always refused.
     allowed-schemes: https
+  # Capabilities sessions may ask for, comma separated: docker (a Docker Engine of their own), libvirt
+  # (virtual machines with QEMU/KVM, for Vagrant). Either one makes the session's container privileged and
+  # started as root, so that the image (bobcrew/bob-power) can start the daemons; the agent itself runs as
+  # docker.user. Users of such sessions can become root on this Docker host: allow them only for users you
+  # trust with that. None by default.
+  allowed-capabilities: ${BOBCREW_ALLOWED_CAPABILITIES:}
   auth:
     jwt-secret-file: ${BOBCREW_JWT_SECRET_FILE:}
     revoked-jti-file: ${BOBCREW_REVOKED_JTI_FILE:}

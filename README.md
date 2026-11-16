@@ -23,15 +23,20 @@ browser --http 127.0.0.1--> [bobcrew-ui] --HTTPS + Bearer JWT--> [bobcrew-server
 
 Each container runs as a non-root user in `/opt/workspace`, sees no directory of the host and none of
 its environment variables, and is removed when its session ends. The image carries every tool the
-agent needs, so the server machine needs only Java and Docker.
+agent needs, so the server machine needs only Java and Docker. Optionally, and only where the server
+allows it, a session can get a Docker Engine or virtual machines of its own
+([capabilities](#capabilities-docker-and-virtual-machines)). By default containers have no resource
+limits; sessions can [ask for some](#resources).
+Users can upload files into a session's workspace, and a role can have a git repository cloned there
+when the session starts.
 
 | Module | What it is |
 |---|---|
 | `bobcrew-server` | The service. Starts the agent containers, exposes the API over TLS, checks a JWT on every request. |
 | `bobcrew-ui` | A small app for your laptop. Serves the web pages on `127.0.0.1` and forwards API calls with your token. |
 | `bobcrew-fake-agent` | A scripted ACP agent, for tests and for trying things without a Bob API key. |
-| `docker/` | The session images: `bob-base` (the default), and `bob-java-python` and `bob-java` built on it. |
-| `ui.template/` | A starting `~/.bobcrew/` for the UI: `ui.properties` and an example Developer role. |
+| `docker/` | The session images: `bob-base` (the default), and `bob-java-python`, `bob-java` and `bob-power` (Docker and Vagrant/libvirt) built on it. |
+| `ui.template/` | A starting `~/.bobcrew/` for the UI: `ui.properties` and two example roles, Developer and Power User. |
 
 Sessions live in memory: restarting the server ends them and removes their containers.
 
@@ -51,8 +56,8 @@ mvn install
 The server never pulls images: every image a session uses must already be on the server's Docker.
 
 ```
-scripts/build-images.sh                    # bobcrew/bob-base, bob-java-python and bob-java (all :latest)
-scripts/build-images.sh --only java-python # just one (base, java or java-python)
+scripts/build-images.sh                    # bobcrew/bob-base, bob-java, bob-java-python and bob-power (all :latest)
+scripts/build-images.sh --only java-python # just one (base, java, java-python or power)
 scripts/build-images.sh --refresh-bob      # reinstall the latest Bob Shell, keep the other layers
 scripts/push-images.sh [-i key] user@host bobcrew/bob-java:latest   # or --all for every bobcrew/* image
 ```
@@ -68,6 +73,9 @@ Node.js 22 and Linux Homebrew. Its entrypoint, `bobcrew-entrypoint`, is the cont
 - `/etc/bobcrew/profile.d/*.sh` are sourced before the agent starts: that is where an image adds
   `PATH` entries and tool settings (no login shell runs);
 - the command is the server's `bobcrew.agent.command` (by default `bob acp ...`);
+- in sessions with [capabilities](#capabilities-docker-and-virtual-machines) only, the container starts as
+  root: `/etc/bobcrew/root.d/*.sh` run first, as root (to start daemons), then the entrypoint becomes the
+  agent's user, and it refuses to run the agent as root;
 - git and GitHub are set up from environment variables a role can pass: `GIT_USER_NAME` and
   `GIT_USER_EMAIL` become git's `user.name` and `user.email`, and `GH_TOKEN` (or `GITHUB_TOKEN`) is used
   by the gh CLI and stored in git's credential store for `https://github.com` (in `$HOME`, mode 600,
@@ -79,6 +87,11 @@ what the example Developer role uses. `bobcrew/bob-java` adds Gradle and Ant ins
 
 For a stack of your own, copy one of them: build on `bobcrew/bob-base`, put PATH and tool settings in
 a `profile.d` snippet, keep `USER bob` at the end, and name the image in a role.
+
+`bobcrew/bob-power` ([`docker/bob-power`](docker/bob-power/Dockerfile)) is bob-java-python plus Docker
+Engine (with compose and buildx) and Vagrant with the libvirt provider (QEMU/KVM), for
+sessions with the [docker and libvirt capabilities](#capabilities-docker-and-virtual-machines). QEMU and libvirt are not in UBI 9,
+so they come from CentOS Stream 9.
 
 ## Quick start
 
@@ -191,7 +204,9 @@ told to work per ticket with unit tests, the ticket id in commit messages, and a
 patch before committing (which needs a server running Bob without `--disable-subagents`).
 
 The front matter is optional. It understands `name` (default: the id), `description`, `image` (default:
-the server's `bobcrew.docker.default-image`), `repository` and `branch` (below), and `env`: names of
+the server's `bobcrew.docker.default-image`), `repository` and `branch` (below), `capabilities`
+([Capabilities](#capabilities-docker-and-virtual-machines)), `memory` and `cpus` ([Resources](#resources)),
+and `env`: names of
 environment variables, separated by commas or spaces. When a session is created with the role, the UI app reads those variables from **its
 own** environment (the laptop's, not the server's) and passes them to the session's container; the
 values never go through the browser, and a variable that is not set is left out (the page says which).
@@ -221,6 +236,10 @@ and fails, leaving nothing behind, if git does. The first prompt then carries a 
 agent where the repository is and that it is shallow; the note is not shown as part of the user's text,
 and it is left out after a **Clear** that deleted the workspace. Only `https://` URLs are accepted, never with
 credentials in them.
+
+A role can ask for [capabilities](#capabilities-docker-and-virtual-machines) (`capabilities: docker, libvirt`) and
+[resources](#resources) (`memory: 16GB`, `cpus: 4`);
+[`ui.template/roles/power-user.md`](ui.template/roles/power-user.md) is an example, with `bobcrew/bob-power`.
 
 When creating a session, the **Role** list next to the title (shown when there are roles) can pick
 one: once the session exists, the UI sends the role's prompt to it as the first prompt, and a blank title becomes
@@ -252,6 +271,54 @@ keep the workspace's files (useful when the agent has cloned a repository there)
 **Metrics** opens a small panel with the container's state, uptime, CPU, memory (used and limit),
 process count, network and disk I/O. It is fetched only while the panel is open, every 5 seconds.
 
+## Capabilities: Docker and virtual machines
+
+Some work needs more than the agent's container: integration tests that start containers
+(Testcontainers, `docker compose`), or virtual machines with Vagrant. A session can ask for two
+capabilities, each allowed separately by the server:
+
+| Capability | The agent gets |
+|---|---|
+| `docker` | A Docker Engine of its own, inside the session's container (`docker`, `docker compose`, `docker buildx`); not the server's Docker, so nothing it starts shows up there |
+| `libvirt` | A libvirt daemon for QEMU/KVM virtual machines, which Vagrant's libvirt provider uses |
+
+None is allowed unless the server says so, for example `BOBCREW_ALLOWED_CAPABILITIES=docker` or
+`docker,libvirt`. Then each session must ask: the role's `capabilities: docker, libvirt`, or the
+**Docker** and **Virtual machines** boxes under **Options** below the role list (each shown only when the
+selected server allows it; a role's capabilities are ticked and locked). The image must have the tools:
+`bobcrew/bob-power` has both. A session asking for one the server does not allow gets 403.
+
+How it works: a session with any capability gets a privileged container, started as root, with
+`BOBCREW_CAPABILITIES` listing what it asked for. `bobcrew-entrypoint` runs the image's
+`/etc/bobcrew/root.d/*.sh` as root (bob-power's start `dockerd` for `docker` and `libvirtd` for `libvirt`,
+only those asked for, logging to `/var/log/bobcrew/`), then runs the agent as `bobcrew.docker.user` with that
+user's groups (`docker`, `kvm`, `libvirt` in bob-power); it refuses to start the agent as root. Docker's and
+libvirt's data are in anonymous volumes, removed with the container, so everything the agent started goes
+when the session is closed. A **Clear** that deletes the workspace runs as root here, since the agent's own
+containers leave files owned by root. Nested containers and virtual machines need memory: ask for it (see
+[Resources](#resources)).
+
+Virtual machines need `/dev/kvm` on the server (hardware virtualisation; nested virtualisation when the
+server is itself a VM). Vagrant's default provider is libvirt, synced folders use rsync (no NFS in the
+container), and boxes must support libvirt (`generic/ubuntu2204`, `generic/rocky9`, ...). Images and boxes
+are downloaded from the internet as usual. On hosts with libvirt installed, AppArmor confines
+`/usr/sbin/libvirtd` even inside containers, so bob-power runs a copy from `/usr/local/libexec/bobcrew/`.
+
+**This gives up the container's isolation.** Both capabilities need a privileged container, which can reach
+the server's devices and kernel, and the agent's groups are as good as root in the container: whoever can use
+such a session (any user of the server, for now) can become root on the server. Allow capabilities only on
+a server dedicated to users you trust with that.
+
+## Resources
+
+By default a session's container has no memory, CPU or process limit. A session can ask for limits:
+`memory` (such as `8GB` or `512MB`) and `cpus` (such as `2` or `0.5`), in its role's front matter, in the
+**Memory** and **CPUs** fields under **Options** (filled from the role, and changeable), or in the API's
+`resources`. The server can set defaults for sessions that ask for nothing (`BOBCREW_MEMORY_LIMIT`,
+`BOBCREW_CPUS`) and caps on what they may ask for (`BOBCREW_MAX_MEMORY`, `BOBCREW_MAX_CPUS`; a session
+asking for nothing then gets the cap). A request above a cap is refused with 400. `BOBCREW_PIDS_LIMIT` caps
+the number of processes in every container. The session header shows what a session got.
+
 ## Server configuration
 
 Set as environment variables, or as the Spring properties in
@@ -272,11 +339,14 @@ Set as environment variables, or as the Spring properties in
 | `BOBCREW_DOCKER_API_VERSION` | `1.44` | Docker Engine API version (Docker 29 needs 1.44 or newer) |
 | `BOBCREW_DEFAULT_IMAGE` | `bobcrew/bob-base:latest` | Image for sessions whose role names none |
 | `BOBCREW_INSTANCE_ID` | `default` | Labels this server's containers; servers sharing a Docker daemon need different ids |
+| `BOBCREW_ALLOWED_CAPABILITIES` | none | [Capabilities](#capabilities-docker-and-virtual-machines) sessions may ask for: `docker`, `libvirt`, comma separated (their users can become root on the server) |
+| `BOBCREW_MEMORY_LIMIT`, `BOBCREW_CPUS` | `0` (no limit) | Limits for sessions that ask for none ([Resources](#resources)) |
+| `BOBCREW_MAX_MEMORY`, `BOBCREW_MAX_CPUS` | `0` (no cap) | The most a session may ask for |
+| `BOBCREW_PIDS_LIMIT` | `0` (no limit) | Most processes per container |
 
 Further properties: `bobcrew.max-sessions` (8), `bobcrew.request-timeout` (30s),
 `bobcrew.prompt-timeout` (10m), `bobcrew.permission-timeout` (2m), `bobcrew.idle-timeout` (12h),
 `bobcrew.event-buffer-size` (5000), and per container `bobcrew.docker.user` (`1000:1000`, never root),
-`bobcrew.docker.memory-limit` (4GB), `bobcrew.docker.cpus` (2), `bobcrew.docker.pids-limit` (1024),
 `bobcrew.docker.network` (`bridge`), `bobcrew.docker.stop-timeout` (5s), `bobcrew.docker.max-env-vars`
 (32), `bobcrew.docker.max-env-value-length` (32768); for repositories, `bobcrew.git.clone-timeout` (10m) and
 `bobcrew.git.allowed-schemes` (`https`).
@@ -285,7 +355,8 @@ Further properties: `bobcrew.max-sessions` (8), `bobcrew.request-timeout` (30s),
 `bobcrew.instance=<instance id>`, `bobcrew.session` and `bobcrew.owner`. When the server starts, and when
 it stops, it removes every container with its instance id, so a server killed with `kill -9` leaves
 nothing behind once restarted. The containers get Docker's init process, no capabilities,
-`no-new-privileges`, the limits above, and no mounts.
+`no-new-privileges`, the resource limits that apply, and no mounts. Sessions with capabilities are the
+exception, described above; their containers also carry `bobcrew.capabilities`.
 
 Notes on Bob:
 
@@ -309,7 +380,8 @@ Notes on Bob:
 - **Isolation**: each session is a container with no host directories, no host environment, a
   non-root user, no capabilities and resource limits. The workspace, `/opt/workspace`, lives and dies
   with the container. Containers share Docker's default bridge network, as the agent needs to reach its
-  model API.
+  model API. Sessions with [capabilities](#capabilities-docker-and-virtual-machines), off by default, give
+  this up: their users can become root on the server.
 - **Images**: never pulled. Whoever runs Docker on the server decides what can run; a client naming an
   image that is not there gets 400.
 - **Environment variables**: a client may set at most 32, with plain names; `BOB_API_KEY`,
@@ -336,10 +408,10 @@ All under `/api`, with `Authorization: Bearer <token>`.
 
 | Request | Does |
 |---|---|
-| `GET /me` | The token's user |
+| `GET /me` | The token's user (`user`), the capabilities sessions may ask for (`capabilities`), and the caps on resources (`maxMemoryBytes`, `maxCpus`; null for none) |
 | `GET /sessions` | All sessions |
-| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). 400 if the image is not on the server, a variable is refused, or the repository is refused or cannot be cloned |
-| `GET /sessions/{id}` | One session: `id`, `owner`, `title`, `image`, `containerId`, `repository` (`url`, `branch`, `directory`, or null), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
+| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). 400 if the image is not on the server, a variable is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the server's cap; 403 for a capability the server does not allow |
+| `GET /sessions/{id}` | One session: `id`, `owner`, `title`, `image`, `containerId`, `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
 | `DELETE /sessions/{id}` | Closes it and removes its container |
 | `GET /sessions/{id}/file?path=<path>` | Downloads a regular file from the session's workspace; `path` is relative to `/opt/workspace` or absolute inside it, `file://` allowed (403 if downloads are disabled) |
 | `PUT /sessions/{id}/files?path=<path>` (the file as the body) | Writes a file into the workspace, creating directories and replacing a file there; `path` as for downloads. Answers 201 `{"path", "size"}`; 400 for a path outside the workspace, a link or a directory, 413 if too large, 403 if uploads are disabled |
@@ -352,9 +424,10 @@ All under `/api`, with `Authorization: Bearer <token>`.
 | `GET /sessions/{id}/events?after=<seq>` | Server-Sent Events: the session's events after `seq`, then new ones |
 
 The UI app answers two more paths itself, without contacting a server: `GET /api/roles` (`[{"id", "name",
-"description", "image", "env", "repository", "branch"}]`, `env` being names only) and `GET /api/roles/{id}` (adds
+"description", "image", "env", "repository", "branch", "capabilities", "memory", "cpus"}]`, `env` being names only) and `GET /api/roles/{id}` (adds
 `prompt` and the raw `manifest`; 404 if there is no such role). It also rewrites `POST /api/sessions`: the page
-sends `{"title", "role"}`, and the server receives the role's `image`, `env` and `repository` (header
+sends `{"title", "role", "capabilities", "resources"}`, and the server receives the role's `image`, `env` and
+`repository`, the role's capabilities with any the page adds, and the page's resources or else the role's (header
 `X-BobCrew-Missing-Env` lists the variables that were not set). Uploads are streamed through it; other request
 bodies are limited to 1 MB.
 
@@ -369,7 +442,8 @@ One process on one machine, by design. A later version can split it into workers
 agent containers), stateless coordinators and a small metadata store; `SessionManager` is the seam
 for that. Also not done yet: per-user API keys, cloning over ssh, re-cloning after a wipe,
 restricting sessions to their owner, resuming a session after a restart, workspaces that outlive their
-session or are shared between sessions, pulling images, per-session network policies, metrics history.
+session or are shared between sessions, pulling images, per-session network policies, metrics history,
+capabilities without a privileged container (with a runtime such as Sysbox), capabilities allowed per user.
 
 ## License
 

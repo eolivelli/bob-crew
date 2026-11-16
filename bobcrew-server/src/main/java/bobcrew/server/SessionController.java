@@ -37,17 +37,22 @@ class SessionController {
     private static final Duration KEEPALIVE = Duration.ofSeconds(15);
 
     /** {@code env} values are secrets as far as the server is concerned: never logged or returned. */
-    record CreateRequest(String title, String image, Map<String, String> env, RepositoryRequest repository) {
+    record CreateRequest(String title, String image, Map<String, String> env, RepositoryRequest repository,
+            List<String> capabilities, ResourcesRequest resources) {
 
         @Override
         public String toString() {
             return "CreateRequest[title=" + title + ", image=" + image + ", env="
-                    + (env == null ? "{}" : env.keySet()) + ", repository=" + repository + "]";
+                    + (env == null ? "{}" : env.keySet()) + ", repository=" + repository + ", capabilities=" + capabilities + ", resources=" + resources + "]";
         }
     }
 
     /** A repository to clone into the new session's workspace; no branch means the default one. */
     record RepositoryRequest(String url, String branch) {
+    }
+
+    /** Limits for the new session's container: memory such as {@code "8GB"}, CPUs such as 2 or 0.5. */
+    record ResourcesRequest(String memory, Double cpus) {
     }
 
     record ClearRequest(Boolean wipeWorkspace) {
@@ -74,9 +79,20 @@ class SessionController {
         this.properties = properties;
     }
 
+    /**
+     * The caller, and what this server lets sessions ask for: {@code capabilities}, and the caps on resource
+     * requests ({@code maxMemoryBytes}, {@code maxCpus}; null for none).
+     */
     @GetMapping("/me")
-    Map<String, String> me(Principal principal) {
-        return Map.of("user", principal.getName());
+    Map<String, Object> me(Principal principal) {
+        Map<String, Object> me = new java.util.LinkedHashMap<>();
+        me.put("user", principal.getName());
+        me.put("capabilities", sessions.allowedCapabilities());
+        BobCrewProperties.Docker docker = properties.docker();
+        me.put("maxMemoryBytes", docker.maxMemory() == null || docker.maxMemory().toBytes() <= 0 ? null
+                : docker.maxMemory().toBytes());
+        me.put("maxCpus", docker.maxCpus() > 0 ? docker.maxCpus() : null);
+        return me;
     }
 
     @GetMapping("/sessions")
@@ -94,7 +110,10 @@ class SessionController {
         GitRepository repository = request.repository() == null ? null
                 : GitRepository.of(request.repository().url(), request.repository().branch(),
                         properties.git().allowedSchemes());
-        return sessions.create(principal.getName(), title, request.image(), request.env(), repository).info();
+        Resources resources = request.resources() == null ? Resources.of(null, null, properties.docker())
+                : Resources.of(request.resources().memory(), request.resources().cpus(), properties.docker());
+        return sessions.create(principal.getName(), title, request.image(), request.env(), repository,
+                request.capabilities(), resources).info();
     }
 
     @GetMapping("/sessions/{id}")

@@ -57,7 +57,8 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `docker/bob-base/` | The default session image (UBI 9, Bob Shell, git, gh, Node, Homebrew) and `bobcrew-entrypoint.sh`, the image/server contract |
 | `docker/bob-java/` | Example image built on bob-base (JDK 21, Maven, Gradle, Ant) |
 | `docker/bob-java-python/` | Development template image (JDK 21, Maven 3.9, Python 3.11); git/GitHub setup comes from bob-base's `profile.d/40-git.sh` |
-| `ui.template/` | Starting `~/.bobcrew/` for UI users (`ui.properties`, `roles/developer.md`), copied by `scripts/init-ui-config.sh`; `RoleRegistryTest` checks the role stays valid |
+| `docker/bob-power/` | bob-java-python plus Docker Engine and Vagrant/libvirt (QEMU from CentOS Stream 9), for sessions with the docker and libvirt capabilities; `root.d/` starts the daemons asked for |
+| `ui.template/` | Starting `~/.bobcrew/` for UI users (`ui.properties`, `roles/developer.md`, `roles/power-user.md`), copied by `scripts/init-ui-config.sh`; `RoleRegistryTest` checks the roles stay valid |
 | `scripts/gen-dev-certs.sh` | Private CA, server certificate and JWT secret for development |
 | `scripts/build-images.sh`, `scripts/push-images.sh` | Build the images; copy images to another machine's Docker over ssh |
 
@@ -68,7 +69,8 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager`. |
 | `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limit, idle cleanup, shutdown, and the checks on client-supplied environment variables. |
 | `AgentSession` | One agent container and its ACP session: start (with the repository clone), prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
-| `DockerRuntime` | The only class that talks to Docker: creates containers (hardened, labelled, never pulling), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
+| `DockerRuntime` | The only class that talks to Docker: creates containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
+| `Capabilities`, `Resources` | What a session may run besides commands (`docker`, `libvirt`), checked against `bobcrew.allowed-capabilities`; and its memory and CPU limits, checked against the server's caps. |
 | `GitRepository` | A repository to clone into a new session: checks the URL (allowed schemes, no credentials) and branch, and names the clone's directory. |
 | `ContainerAcpTransport` | The SDK's `AcpClientTransport` over a container's attach streams. The one class of ours with Reactor types, because the SDK interface has them. |
 | `ContainerMetrics` | The metrics record (`GET /sessions/{id}/metrics`). |
@@ -138,6 +140,12 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 - **Exec input never ends**: docker-java's httpclient5 transport does not half-close the connection when
   an exec's stdin stream ends, so a command reading to end of input waits forever. `DockerRuntime.writeFile`
   therefore spools the upload to a temporary file first, to know its size, and runs `head -c <size>`.
+- **Sessions with capabilities start as root**: the container's user is `0:0`, `BOBCREW_AGENT_USER` names the
+  user to become and `BOBCREW_CAPABILITIES` what the `root.d` scripts should start. `bobcrew-entrypoint` runs `/etc/bobcrew/root.d/*.sh` (daemons) and re-runs itself through
+  `setpriv`; execs the server makes (clone, uploads) still name `bobcrew.docker.user`, so they never take
+  that root path. Docker data needs a volume (dockerd cannot layer on overlayfs), which bob-power declares
+  with `VOLUME`; the cgroup v2 move into `/init` in `root.d/50-docker.sh` is what lets dockerd create
+  cgroups. `CapabilitiesIntegrationTest` covers this with the fake agent's image and a test `root.d` hook.
 - **Leftover containers**: every container carries `bobcrew.managed` and `bobcrew.instance` labels;
   `DockerRuntime.removeOrphans` removes those of this instance at startup and in `closeAll`. Tests use a
   random instance id so that they never touch a real server's containers on the same machine.
@@ -171,8 +179,14 @@ the maintainer.
   session's details.
 - Containers get no host mounts (binds or volumes), no host environment, no capabilities,
   `no-new-privileges`, and a non-root user enforced by the server. Images are never pulled. Keep it so.
+  The one exception is a session with capabilities: only for capabilities in `bobcrew.allowed-capabilities`
+  (default none) that the session asked for, the container is privileged and starts as root, and the entrypoint must still drop
+  to `BOBCREW_AGENT_USER` before the agent runs (it exits 77 rather than run the agent as root). Never make
+  this the default, never apply it to sessions that did not ask, and keep host mounts out of it too (image
+  `VOLUME`s are anonymous and removed with the container).
 - Session creation from the browser goes through the UI's role expansion: the page never sees
-  environment variable values and cannot pick an image, variables or a repository itself.
+  environment variable values and cannot pick an image, variables or a repository itself. It may ask for
+  `capabilities` and `resources`; the server decides whether they are allowed.
 - The server has no cookies and no CORS headers. Adding either creates a CSRF surface that does
   not exist today.
 - The UI app binds to `127.0.0.1` and has no login; `LocalOnlyFilter` (Host, Origin,

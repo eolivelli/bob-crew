@@ -1,0 +1,8 @@
+# Defaults for every Vagrantfile in a bob-power session; a project's Vagrantfile overrides them.
+# There is no NFS server in the container, so synced folders are copied with rsync.
+Vagrant.configure("2") do |config|
+  config.vm.synced_folder ".", "/vagrant", type: "rsync"
+  config.vm.provider :libvirt do |libvirt|
+    libvirt.uri = "qemu:///system"
+  end
+end

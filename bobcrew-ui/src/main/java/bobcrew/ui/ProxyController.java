@@ -238,6 +238,21 @@ class ProxyController {
                     "The image, environment and repository of a session come from its role");
             return Optional.empty();
         }
+        // the page may ask for capabilities and resources itself; the server checks the values
+        JsonNode capabilities = request.get("capabilities");
+        if (capabilities != null && !(capabilities.isArray() && capabilities.valueStream().allMatch(JsonNode::isString))) {
+            sendError(response, HttpServletResponse.SC_BAD_REQUEST, "capabilities must be a list of names");
+            return Optional.empty();
+        }
+        JsonNode resources = request.get("resources");
+        if (resources != null && !(resources instanceof ObjectNode
+                && (resources.get("memory") == null || resources.get("memory").isString())
+                && (resources.get("cpus") == null || resources.get("cpus").isNumber())
+                && resources.propertyNames().stream().allMatch(n -> n.equals("memory") || n.equals("cpus")))) {
+            sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+                    "resources must be {\"memory\": \"8GB\", \"cpus\": 2}, both optional");
+            return Optional.empty();
+        }
         JsonNode roleId = request.remove("role");
         if (roleId != null && !roleId.isNull() && !roleId.asString("").isBlank()) {
             Optional<RoleRegistry.Role> role = roles.get(roleId.asString(""));
@@ -267,9 +282,34 @@ class ProxyController {
                     repository.put("branch", role.get().branch());
                 }
             }
-            log.info("Creating a session with role {} (image {}, environment {}, not set here: {}, repository {})",
+            // the role's capabilities always apply, with any the page adds
+            if (!role.get().capabilities().isEmpty()) {
+                ArrayNode merged = request.putArray("capabilities");
+                java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>(role.get().capabilities());
+                if (capabilities != null) {
+                    capabilities.valueStream().forEach(name -> names.add(name.asString()));
+                }
+                names.forEach(merged::add);
+            }
+            // the role's resources, unless the page sends its own
+            if (role.get().memory() != null || role.get().cpus() != null) {
+                ObjectNode merged = json.createObjectNode();
+                if (role.get().memory() != null) {
+                    merged.put("memory", role.get().memory());
+                }
+                if (role.get().cpus() != null) {
+                    merged.put("cpus", role.get().cpus());
+                }
+                if (resources != null) {
+                    merged.setAll((ObjectNode) resources);
+                }
+                request.set("resources", merged);
+            }
+            log.info("Creating a session with role {} (image {}, environment {}, not set here: {}, repository {}, "
+                    + "capabilities {}, resources {})",
                     role.get().id(), role.get().image() == null ? "default" : role.get().image(), env.propertyNames(),
-                    missingEnv, role.get().repository() == null ? "none" : role.get().repository());
+                    missingEnv, role.get().repository() == null ? "none" : role.get().repository(),
+                    request.path("capabilities"), request.path("resources"));
         }
         return Optional.of(json.writeValueAsBytes(request));
     }

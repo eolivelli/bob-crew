@@ -236,6 +236,7 @@ function buildTranscriptHtml(session, events, context) {
   const meta = [
     session.agent || 'agent',
     'image ' + session.image,
+    ...(session.capabilities && session.capabilities.length ? ['capabilities ' + session.capabilities.join(', ')] : []),
     ...(session.repository ? ['repository ' + session.repository.url
       + (session.repository.branch ? ' (' + session.repository.branch + ')' : '')] : []),
     'owner ' + session.owner,

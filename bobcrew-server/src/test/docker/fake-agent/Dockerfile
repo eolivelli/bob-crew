@@ -3,7 +3,9 @@
 # bobcrew-entrypoint.sh (from docker/bob-base) and fake-agent.jar to the build context.
 #
 # It also has git and a bare repository, /opt/test-repos/sample.git (branches main and feature), for the
-# tests that clone a repository into a session's workspace without network access.
+# tests that clone a repository into a session's workspace without network access, and a root.d hook
+# that sessions with capabilities run as root before the agent starts (it writes its uid and
+# BOBCREW_CAPABILITIES to /run/bobcrew-root-hook).
 FROM eclipse-temurin:21-jre-ubi9-minimal
 RUN microdnf install -y git-core && microdnf clean all
 COPY bobcrew-entrypoint.sh /usr/local/bin/bobcrew-entrypoint
@@ -19,7 +21,9 @@ RUN chmod 755 /usr/local/bin/bobcrew-entrypoint \
  && git checkout -q -b feature && echo "a feature" > FEATURE.md && git add FEATURE.md && git commit -qm "feature" \
  && git checkout -q main \
  && mkdir -p /opt/test-repos && git clone -q --bare /tmp/sample /opt/test-repos/sample.git \
- && chown -R 1000:1000 /opt/test-repos && rm -rf /tmp/sample /root/.gitconfig
+ && chown -R 1000:1000 /opt/test-repos && rm -rf /tmp/sample /root/.gitconfig \
+ && mkdir -p /etc/bobcrew/root.d \
+ && printf 'echo "$(id -u) ${BOBCREW_CAPABILITIES:-}" > /run/bobcrew-root-hook\n' > /etc/bobcrew/root.d/10-test.sh
 USER 1000:1000
 WORKDIR /opt/workspace
 ENTRYPOINT ["/usr/local/bin/bobcrew-entrypoint"]

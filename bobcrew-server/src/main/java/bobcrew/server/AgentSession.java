@@ -49,7 +49,7 @@ final class AgentSession {
 
     /** What clients see of a session. */
     record Info(String id, String owner, String title, String image, String containerId, GitRepository repository,
-            Status status, String agent, String currentMode, List<Mode> modes, Instant createdAt, Instant updatedAt,
+            List<String> capabilities, Resources resources, Status status, String agent, String currentMode, List<Mode> modes, Instant createdAt, Instant updatedAt,
             long lastSeq) {
     }
 
@@ -152,7 +152,9 @@ final class AgentSession {
     }
 
     Info info() {
-        return new Info(id, owner, title, spec.image(), DockerRuntime.shortId(containerId), repository, status, agentName,
+        return new Info(id, owner, title, spec.image(), DockerRuntime.shortId(containerId), repository, spec.capabilities(), spec.resources(),
+                status,
+                agentName,
                 currentMode, modes, createdAt, updatedAt, events.lastSeq());
     }
 
@@ -245,7 +247,7 @@ final class AgentSession {
         try {
             if (wipeWorkspace) {
                 repositoryPresent = false;
-                docker.wipeWorkspace(containerId);
+                docker.wipeWorkspace(containerId, spec.privileged());
             }
             AcpSchema.NewSessionResponse created;
             try {

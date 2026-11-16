@@ -61,6 +61,8 @@ class UiProxyTest {
                     "---\nname: Builder\nimage: bobcrew/bob-java:latest\nenv: GH_TOKEN, NOT_SET_HERE\n---\nBuild it.\n");
             Files.writeString(rolesDir.resolve("cloner.md"),
                     "---\nname: Cloner\nrepository: https://github.com/datastax/cassandra\nbranch: main\n---\nFix it.\n");
+            Files.writeString(rolesDir.resolve("power.md"),
+                    "---\nname: Power\nimage: bobcrew/bob-power:latest\ncapabilities: docker\nmemory: 8GB\ncpus: 2\n---\nRun VMs.\n");
             Path keyStoreFile = directory.resolve("upstream.p12");
             Process keytool = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "keytool").toString(),
                     "-genkeypair", "-alias", "server", "-keyalg", "RSA", "-keysize", "2048", "-validity", "2",
@@ -269,6 +271,25 @@ class UiProxyTest {
         // a role with a repository to clone
         assertThat(post("/api/sessions", "{\"role\":\"cloner\"}").body()).contains("\"body\":{\"repository\":"
                 + "{\"url\":\"https://github.com/datastax/cassandra\",\"branch\":\"main\"}}");
+
+        // a role's capabilities always apply, with any the page adds; its resources unless the page sends its own
+        assertThat(post("/api/sessions", "{\"role\":\"power\"}").body())
+            .contains("\"body\":{\"image\":\"bobcrew/bob-power:latest\",\"capabilities\":[\"docker\"],"
+                    + "\"resources\":{\"memory\":\"8GB\",\"cpus\":2.0}}");
+        assertThat(post("/api/sessions", "{\"role\":\"power\",\"capabilities\":[\"libvirt\"],"
+                + "\"resources\":{\"cpus\":4}}").body())
+            .contains("\"capabilities\":[\"docker\",\"libvirt\"]")
+            .contains("\"resources\":{\"memory\":\"8GB\",\"cpus\":4}");
+        // without a role the page may ask for them itself; the server decides
+        assertThat(post("/api/sessions", "{\"capabilities\":[\"docker\"],\"resources\":{\"memory\":\"1GB\"}}").body())
+            .contains("\"body\":{\"capabilities\":[\"docker\"],\"resources\":{\"memory\":\"1GB\"}}");
+        for (String bad : new String[] {"{\"capabilities\":\"docker\"}", "{\"capabilities\":[1]}",
+                "{\"resources\":{\"memory\":8}}", "{\"resources\":{\"cpus\":\"2\"}}", "{\"resources\":{\"disk\":\"1GB\"}}",
+                "{\"resources\":[]}"}) {
+            assertThat(post("/api/sessions", bad).statusCode()).as(bad).isEqualTo(400);
+        }
+        assertThat(get("/api/roles").body()).contains("\"id\":\"power\"").contains("\"capabilities\":[\"docker\"]")
+            .contains("\"memory\":\"8GB\"").contains("\"cpus\":2.0");
 
         // a role without image or env, and no role at all
         assertThat(post("/api/sessions", "{\"role\":\"qa-tester\"}").body()).contains("\"body\":{}");

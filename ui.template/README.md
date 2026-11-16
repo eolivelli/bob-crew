@@ -6,6 +6,7 @@ A starting point for `~/.bobcrew/`, the configuration directory of the user who 
 ui.template/
   ui.properties        -> ~/.bobcrew/ui.properties   server URL, token file, CA
   roles/developer.md   -> ~/.bobcrew/roles/developer.md
+  roles/power-user.md  -> ~/.bobcrew/roles/power-user.md
 ```
 
 Copy it with `scripts/init-ui-config.sh`, which never overwrites a file that already exists, then edit
@@ -49,3 +50,12 @@ repository checked out, add `repository: https://github.com/<owner>/<repo>` and 
 to the front matter: the server clones it (shallow) into `/opt/workspace/<repo>` before the agent starts, and
 tells the agent so in the first prompt. With `GH_TOKEN` set, private GitHub repositories work too. See "Roles" in the main
 README for the manifest format.
+
+## The Power User role
+
+`roles/power-user.md` is the Developer with Docker and virtual machines: it runs in
+`bobcrew/bob-power:latest` (`scripts/build-images.sh --only power`) with `capabilities: docker, libvirt`, so
+its agent can run `docker`, `docker compose` and `vagrant up` (libvirt/KVM) inside the session, and asks for
+16GB of memory and 4 CPUs. The server must allow both capabilities (`BOBCREW_ALLOWED_CAPABILITIES=docker,libvirt`),
+and for virtual machines it needs `/dev/kvm`. Drop `libvirt` from the list for a Docker-only role. Whoever uses
+such a session can become root on the server: see "Capabilities" in the main README before allowing them.
