@@ -359,9 +359,15 @@ final class AgentSession {
         });
     }
 
-    /** Asks the agent to stop the current turn; pending permission requests are answered as cancelled. */
+    /**
+     * Asks the agent to stop: the current turn, with pending permission requests answered as cancelled, or, when
+     * idle, whatever it still does. Agents such as Bob can end a turn while work it started (a background command,
+     * a sub-task) goes on sending updates; ACP defines {@code session/cancel} for a running turn only, but it is a
+     * notification, so sending it when idle is harmless, and it is the only way to ask for that work to stop.
+     */
     void cancel() {
-        if (status != Status.RUNNING) {
+        Status current = status;
+        if (current != Status.RUNNING && current != Status.IDLE) {
             return;
         }
         cancelPendingPermissions();

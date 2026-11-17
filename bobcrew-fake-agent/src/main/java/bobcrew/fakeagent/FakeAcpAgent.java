@@ -25,6 +25,8 @@ import tools.jackson.databind.node.ObjectNode;
  * <li>{@code tool}: announce a tool call and ask permission before "running" it</li>
  * <li>{@code plan}: send a plan update</li>
  * <li>{@code slow}: stream chunks for up to 60 seconds, until cancelled</li>
+ * <li>{@code background}: end the turn at once, then keep streaming chunks for up to 60 seconds, until a
+ * {@code session/cancel} arrives (as Bob does when work it started outlives the turn)</li>
  * <li>{@code unknown}: send a session update of a kind no client knows</li>
  * <li>{@code crash}: exit abruptly in the middle of the turn</li>
  * <li>{@code whoami}: report the user name, uid and working directory the agent runs with</li>
@@ -42,6 +44,8 @@ public final class FakeAcpAgent {
     private final AtomicLong nextRequestId = new AtomicLong(1000);
     private final Map<Long, CompletableFuture<JsonNode>> pendingResponses = new ConcurrentHashMap<>();
     private final Map<String, AtomicBoolean> cancelled = new ConcurrentHashMap<>();
+    /** Per session: set by {@code session/cancel} to stop work left running after a turn ended. */
+    private final Map<String, AtomicBoolean> backgroundCancelled = new ConcurrentHashMap<>();
     private final Map<String, String> modes = new ConcurrentHashMap<>();
 
     private FakeAcpAgent(PrintStream out) {
@@ -130,6 +134,10 @@ public final class FakeAcpAgent {
                 if (flag != null) {
                     flag.set(true);
                 }
+                AtomicBoolean background = backgroundCancelled.get(params.path("sessionId").asString());
+                if (background != null) {
+                    background.set(true);
+                }
             }
             case "session/close" -> respond(id, JSON.createObjectNode());
             default -> {
@@ -209,6 +217,9 @@ public final class FakeAcpAgent {
             }
             chunk(sessionId, "agent_message_chunk", outcome);
         }
+        if (lower.contains("background")) {
+            startBackgroundWork(sessionId);
+        }
         if (lower.contains("slow")) {
             for (int i = 0; i < 600; i++) {
                 if (stop.get()) {
@@ -225,6 +236,27 @@ public final class FakeAcpAgent {
             chunk(sessionId, "agent_message_chunk", word + " ");
         }
         return stopReason("end_turn");
+    }
+
+    /** Streams chunks after the turn has ended, until cancelled or for 60 seconds. */
+    private void startBackgroundWork(String sessionId) {
+        AtomicBoolean stop = new AtomicBoolean();
+        backgroundCancelled.put(sessionId, stop);
+        Thread.ofPlatform().name("fake-background").start(() -> {
+            try {
+                Thread.sleep(200); // let the turn's answer go out first
+                for (int i = 0; i < 600; i++) {
+                    if (stop.get()) {
+                        chunk(sessionId, "agent_message_chunk", "background work stopped ");
+                        return;
+                    }
+                    chunk(sessionId, "agent_message_chunk", "background tick " + i + " ");
+                    Thread.sleep(100);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
     }
 
     /** Returns the text to report, or null if the client cancelled the permission request. */

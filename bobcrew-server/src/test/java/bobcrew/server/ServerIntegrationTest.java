@@ -332,6 +332,20 @@ class ServerIntegrationTest {
     }
 
     @Test
+    void workGoingOnAfterTheTurnEndedCanBeCancelled() throws Exception {
+        String id = createSession(null).get("id").asString();
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"work in the background\"}", alice);
+        List<JsonNode> ended = events(id, 0, event -> isStatus(event, "IDLE") && event.get("seq").asLong() > 1);
+        assertThat(first(ended, "turn_end").get("data").get("stopReason").asString()).isEqualTo("end_turn");
+        long afterTurn = ended.getLast().get("seq").asLong();
+        List<JsonNode> ticking = events(id, afterTurn, event -> agentText(List.of(event)).contains("background tick"));
+        assertThat(send("POST", "/sessions/" + id + "/cancel", null, alice).statusCode()).isEqualTo(202);
+        List<JsonNode> rest = events(id, ticking.getLast().get("seq").asLong(),
+            event -> agentText(List.of(event)).contains("background work stopped"));
+        assertThat(agentText(rest)).contains("background work stopped");
+    }
+
+    @Test
     void passesOnPlansModeChangesAndUnknownUpdates() throws Exception {
         String id = createSession(null).get("id").asString();
         HttpResponse<String> mode = send("POST", "/sessions/" + id + "/mode", "{\"modeId\":\"plan\"}", alice);

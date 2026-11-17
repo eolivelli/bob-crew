@@ -147,7 +147,8 @@ export BOBCREW_AGENT_COMMAND=java,-jar,/opt/fake-agent.jar
 ```
 
 The fake agent reacts to words in the prompt: `tool` (asks permission), `plan`, `slow` (runs until
-stopped), `crash`, `whoami` (its user, uid and directory), `showenv NAME` (an environment variable),
+stopped), `background` (ends the turn, then keeps sending text until stopped), `crash`, `whoami` (its
+user, uid and directory), `showenv NAME` (an environment variable),
 `writefile` (writes `out/hello.txt`), `makelink` (a symbolic link `out/link` to `/etc/passwd`).
 
 On your laptop, `scripts/init-ui-config.sh` prepares `~/.bobcrew/` from [`ui.template/`](ui.template/README.md)
@@ -558,7 +559,7 @@ Keycloak user without the access role.
 | `PUT /sessions/{id}/files?path=<path>` (the file as the body) | Writes a file into the workspace, creating directories and replacing a file there; `path` as for downloads. Answers 201 `{"path", "size"}`; 400 for a path outside the workspace, a link or a directory, 413 if too large, 403 if uploads are disabled |
 | `GET /sessions/{id}/metrics` | A snapshot of the container: `state`, `startedAt`, `uptimeSeconds`, `cpuPercent` (100 = one core), `memoryUsageBytes`, `memoryLimitBytes`, `pids`, `networkRxBytes`, `networkTxBytes`, `blockReadBytes`, `blockWriteBytes`. Docker samples for a second or two |
 | `POST /sessions/{id}/prompt` `{"text": "..."}` | Starts a turn; progress arrives as events |
-| `POST /sessions/{id}/cancel` | Stops the running turn |
+| `POST /sessions/{id}/cancel` | Stops the running turn. When idle it still sends the agent `session/cancel`, for work it started that outlives the turn (Bob can end a turn while a command it started goes on) |
 | `POST /sessions/{id}/clear` `{"wipeWorkspace": true}` | Starts the conversation over (a fresh agent session in the same container, earlier events forgotten); the session stays open. Deletes everything in the workspace unless `wipeWorkspace` is `false` (the body is optional). Only when idle (409 otherwise) |
 | `POST /sessions/{id}/mode` `{"modeId": "..."}` | Switches the agent's mode |
 | `POST /sessions/{id}/permissions` `{"toolCallId": "...", "optionId": "..."}` | Answers a permission request (the tool call id is in the body because agents' ids can contain `/`) |
