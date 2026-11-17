@@ -33,6 +33,7 @@ RUN dnf -y install dnf-plugins-core \
       qemu-kvm qemu-img libvirt-daemon libvirt-daemon-kvm libvirt-daemon-config-network libvirt-client \
       libvirt-devel dnsmasq \
       vagrant rsync pkgconf-pkg-config \
+      ansible-core \
  && dnf clean all && rm -rf /var/cache/dnf \
  && usermod -aG docker,kvm,libvirt bob \
  && mkdir -p /usr/local/libexec/bobcrew \
@@ -55,7 +56,7 @@ USER bob
 COPY --chown=bob:bob etc/libvirt-client.conf /home/bob/.config/libvirt/libvirt.conf
 COPY --chown=bob:bob etc/Vagrantfile /home/bob/.vagrant.d/Vagrantfile
 RUN vagrant plugin install vagrant-libvirt >&2 \
- && vagrant plugin list && docker --version && vagrant --version && /usr/libexec/qemu-kvm --version
+ && vagrant plugin list && docker --version && vagrant --version && /usr/libexec/qemu-kvm --version && ansible --version
 
 USER root
 RUN chmod 644 /etc/bobcrew/root.d/*.sh /etc/bobcrew/profile.d/*.sh

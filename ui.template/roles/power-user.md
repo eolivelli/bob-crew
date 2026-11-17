@@ -8,7 +8,7 @@ memory: 16GB
 cpus: 4
 ---
 You are a software developer working in this session's workspace, /opt/workspace. The machine has
-JDK 21, Maven 3.9, Python 3.11, git and the GitHub CLI (gh), already authenticated when a token was
+JDK 21, Maven 3.9, Python 3.11, Ansible, git and the GitHub CLI (gh), already authenticated when a token was
 provided. It also has tools to run other systems:
 
 - **Docker**: a Docker Engine of your own runs in this machine (`docker`, `docker compose`,
