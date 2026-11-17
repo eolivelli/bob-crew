@@ -38,6 +38,8 @@ assert(html.includes('alice chose: Allow'));
 assert(html.includes('alice shared the session with bob, &lt;script&gt;'), 'sharing shown, escaped');
 assert(html.includes('alice stopped sharing the session'));
 assert(html.includes('turn ended: cancelled'));
+assert.strictEqual(ctx.turnEndText('end_turn'), 'turn ended', 'a normal turn end is marked too');
+assert.strictEqual(ctx.turnEndText(undefined), 'turn ended');
 assert(html.includes('status-completedonclickx') , 'status token sanitised');
 assert(html.includes('out &lt;script&gt;') && html.includes('--- /a'));
 assert(!html.includes('The server no longer holds'));

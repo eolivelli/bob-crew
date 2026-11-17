@@ -93,6 +93,12 @@ function workspaceEventText(event) {
   return '';
 }
 
+// The marker for a turn_end event, shown for every turn, so that anything the agent sends later is visibly
+// outside the turn; the page uses it too.
+function turnEndText(stopReason) {
+  return !stopReason || stopReason === 'end_turn' ? 'turn ended' : 'turn ended: ' + stopReason;
+}
+
 // The one-line description of a shared event: who the session's owner (or an admin) now shares it with.
 function sharedEventText(event) {
   const users = (event.data && Array.isArray(event.data.users)) ? event.data.users : [];
@@ -185,9 +191,7 @@ function transcriptItems(events) {
       }
       case 'turn_end':
         streaming = null;
-        if (data.stopReason && data.stopReason !== 'end_turn') {
-          items.push({ type: 'divider', text: 'turn ended: ' + data.stopReason });
-        }
+        items.push({ type: 'divider', text: turnEndText(data.stopReason) });
         break;
       case 'error':
         streaming = null;

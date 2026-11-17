@@ -21,7 +21,13 @@ const state = {
   permissions: new Map(),
   streaming: null,      // {kind, body}: the message that chunks are appended to
   plan: null,           // the plan card of the current turn
+  status: null,         // the selected session's status
+  inTurn: false,        // a prompt turn is open (between user_prompt and turn_end)
+  workAfterTurn: false, // the agent went on working after its turn ended, so STOP stays usable
 };
+
+/** Update kinds that mean the agent is doing something, as opposed to reporting its mode or commands. */
+const WORK_UPDATES = new Set(['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan']);
 
 function currentSession() {
   if (!state.current) return null;
@@ -258,6 +264,11 @@ function showHeader(session) {
   if (session.currentMode) select.value = session.currentMode;
 }
 
+// Agents such as Bob can end a turn while work they started goes on; the server passes STOP on to them then too.
+function updateCancel() {
+  $('cancel').disabled = !(state.status === 'RUNNING' || (state.status === 'IDLE' && state.workAfterTurn));
+}
+
 function setStatus(status) {
   const badge = $('session-status');
   badge.textContent = status.toLowerCase();
@@ -265,7 +276,8 @@ function setStatus(status) {
   const open = status === 'IDLE' || status === 'RUNNING';
   $('prompt-form').hidden = !open;
   $('prompt-form').querySelector('button').disabled = status !== 'IDLE';
-  $('cancel').disabled = status !== 'RUNNING';
+  state.status = status;
+  updateCancel();
   $('clear').disabled = status !== 'IDLE';
   $('metrics-toggle').disabled = status === 'CLOSED';
   $('upload').disabled = !open || state.uploading;
@@ -289,6 +301,8 @@ function select(id, serverName) {
   state.permissions.clear();
   state.streaming = null;
   state.plan = null;
+  state.inTurn = false;
+  state.workAfterTurn = false;
   $('transcript').replaceChildren();
   if (session) showHeader(session);
   refreshSessions();
@@ -329,9 +343,17 @@ function render(event) {
     case 'user_prompt':
       state.streaming = null;
       state.plan = null;
+      state.inTurn = true;
+      state.workAfterTurn = false;
+      updateCancel();
       add(linked('div', 'msg user', data.text || ''));
       break;
     case 'update':
+      if (!state.inTurn && !state.workAfterTurn && WORK_UPDATES.has(data.sessionUpdate)) {
+        state.workAfterTurn = true;
+        updateCancel();
+        add(el('div', 'divider', 'the agent is still working after its turn ended'));
+      }
       renderUpdate(data);
       break;
     case 'cleared':
@@ -341,6 +363,9 @@ function render(event) {
       state.permissions.clear();
       state.streaming = null;
       state.plan = null;
+      state.inTurn = false;
+      state.workAfterTurn = false;
+      updateCancel();
       $('transcript').replaceChildren();
       add(el('div', 'divider', 'session cleared' + (event.user ? ' by ' + event.user : '')));
       break;
@@ -348,7 +373,8 @@ function render(event) {
     case 'permission_resolved': resolvePermission(event); break;
     case 'turn_end':
       state.streaming = null;
-      if (data.stopReason && data.stopReason !== 'end_turn') add(el('div', 'divider', 'turn ended: ' + data.stopReason));
+      state.inTurn = false;
+      add(el('div', 'divider', turnEndText(data.stopReason)));
       break;
     case 'status':
       setStatus(data.status);
