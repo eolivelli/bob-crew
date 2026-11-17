@@ -14,8 +14,8 @@ COPY git-credential-bobcrew /usr/local/bin/git-credential-bobcrew
 COPY fake-agent.jar /opt/fake-agent.jar
 RUN chmod 755 /usr/local/bin/bobcrew-entrypoint /usr/local/bin/git-credential-bobcrew \
  && chmod 644 /opt/fake-agent.jar \
- && mkdir -p /opt/workspace \
- && chown 1000:1000 /opt/workspace \
+ && mkdir -p /opt/workspace /home/bob \
+ && chown 1000:1000 /opt/workspace /home/bob \
  && git config --global user.name test && git config --global user.email test@example.com \
  && git init -q -b main /tmp/sample && cd /tmp/sample \
  && echo "the main branch" > README.md && git add README.md && git commit -qm "first" \

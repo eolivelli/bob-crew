@@ -6,6 +6,7 @@ import java.io.InputStream;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -520,6 +521,49 @@ class DockerRuntime implements Closeable {
                         result.exitCode(), result.output().strip());
                 throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "The file could not be written"
                         + (result.output().isBlank() ? "" : ": " + lastLine(result.output())));
+            }
+        }
+    }
+
+    /**
+     * Writes the session's user profile files into /home/bob of the started container before the agent starts.
+     * Each file goes through a unique temporary name in the target directory, so a file is never seen
+     * half-written. The contents reach the container on an exec's standard input, never on a command line.
+     *
+     * @param files validated profile files with relative paths under /home/bob
+     * @throws ApiException 500 if a file cannot be written; the contents are never logged
+     */
+    void writeUserProfile(String containerId, List<ProfileFile> files, Duration timeout) {
+        if (files == null || files.isEmpty()) {
+            return;
+        }
+        String script = """
+                umask 077
+                dir=$(dirname -- "$1")
+                mkdir -p -- "$dir" || exit 4
+                if [ -d "$1" ]; then
+                    exit 8
+                fi
+                tmp=$(mktemp "$dir/profile.XXXXXX") || exit 5
+                head -c "$2" > "$tmp" || { rm -f -- "$tmp"; exit 5; }
+                if [ "$(wc -c < "$tmp")" -ne "$2" ]; then
+                    rm -f -- "$tmp"
+                    exit 6
+                fi
+                chmod "$3" "$tmp" && mv -f -- "$tmp" "$1" || { rm -f -- "$tmp"; exit 7; }
+                """;
+        for (ProfileFile file : files) {
+            byte[] value = Base64.getDecoder().decode(file.contentBase64());
+            String targetPath = "/home/bob/" + file.path();
+            String mode = file.executable() ? "700" : "600";
+            ExecResult result = exec(containerId, timeout, settings.user(), new java.io.ByteArrayInputStream(value),
+                    List.of(), List.of("sh", "-c", script, "bobcrew-profile", targetPath,
+                            Integer.toString(value.length), mode));
+            if (result.exitCode() != 0) {
+                log.warn("Writing profile file {} in container {} exited with {}", file.path(), shortId(containerId),
+                        result.exitCode());
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "The user profile file " + file.path()
+                        + " could not be given to the session");
             }
         }
     }

@@ -40,13 +40,15 @@ class SessionController {
      * container rather than variables, so that they are not in every process's environment.
      */
     record CreateRequest(String title, String image, Map<String, String> env, Map<String, String> secrets,
-            RepositoryRequest repository, List<String> capabilities, ResourcesRequest resources) {
+            RepositoryRequest repository, List<String> capabilities, ResourcesRequest resources,
+            List<ProfileFile> userProfile) {
 
         @Override
         public String toString() {
             return "CreateRequest[title=" + title + ", image=" + image + ", env="
                     + (env == null ? "{}" : env.keySet()) + ", secrets=" + (secrets == null ? "{}" : secrets.keySet())
-                    + ", repository=" + repository + ", capabilities=" + capabilities + ", resources=" + resources + "]";
+                    + ", repository=" + repository + ", capabilities=" + capabilities + ", resources=" + resources
+                    + ", userProfile=" + (userProfile == null ? "[]" : userProfile.stream().map(ProfileFile::path).toList()) + "]";
         }
     }
 
@@ -122,8 +124,8 @@ class SessionController {
         Resources resources = request.resources() == null ? Resources.of(null, null, properties.docker(), caller.limits())
                 : Resources.of(request.resources().memory(), request.resources().cpus(), properties.docker(),
                         caller.limits());
-        return sessions.create(caller, title, request.image(), request.env(), request.secrets(), repository,
-                request.capabilities(), resources).info();
+        return sessions.create(caller, title, request.image(), request.env(), request.secrets(),
+                request.userProfile(), repository, request.capabilities(), resources).info();
     }
 
     @GetMapping("/sessions/{id}")

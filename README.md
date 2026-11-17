@@ -298,6 +298,10 @@ without a role. The rest of the file is the prompt. Files that are not `.md`, ar
 empty prompt, or come after the first 200 are ignored (a warning is logged). The directory is read on every
 request, so changes show up without restarting the UI.
 
+Files in `~/.bobcrew/user-profile/` (or `bobcrew.ui.user-profile-dir`) on the UI machine are automatically
+copied into the container user's home directory (`/home/bob/`) when a session is created (mode `0600`, or `0700`
+if executable). This allows passing custom dotfiles or tool configurations (such as `.m2/settings.xml` or `.gitconfig`).
+
 A role can start every session with a repository checked out:
 
 ```
@@ -570,10 +574,10 @@ whether it logs its user in with Keycloak, and whether someone is), `/login`, `/
 "description", "image", "secrets", "repository", "branch", "capabilities", "memory", "cpus"}]`, `secrets` being names only) and `GET /api/roles/{id}` (adds
 `prompt` and the raw `manifest`; 404 if there is no such role). It also rewrites `POST /api/sessions`: the page
 sends `{"title", "role", "capabilities", "resources"}`, and the server receives the role's `image`, `secrets` (values from
-`~/.bobcrew/secrets.json`) and `repository`, the role's capabilities with any the page adds, and the page's resources or else the role's (header
+`~/.bobcrew/secrets.json`), `userProfile` (files from `~/.bobcrew/user-profile/`) and `repository`, the role's capabilities with any the page adds, and the page's resources or else the role's (header
 `X-BobCrew-Missing-Secrets` lists the secrets the file does not have; the page may not send `image`, `env`,
 `secrets` or `repository` itself). Uploads are streamed through it; other request
-bodies are limited to 1 MB.
+bodies are limited to 2 MB.
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,

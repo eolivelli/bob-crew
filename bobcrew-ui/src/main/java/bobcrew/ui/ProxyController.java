@@ -48,7 +48,7 @@ class ProxyController {
     private static final Logger log = LoggerFactory.getLogger(ProxyController.class);
 
     /** Largest request body forwarded, in bytes. */
-    private static final int MAX_BODY = 1024 * 1024;
+    private static final int MAX_BODY = 2 * 1024 * 1024;
 
     private static final List<String> FORWARDED_REQUEST_HEADERS = List.of("Content-Type", "Accept", "Last-Event-ID");
 
@@ -75,13 +75,16 @@ class ProxyController {
 
     private final OidcLogin login;
 
+    private final UserProfileStore userProfile;
+
     private final JsonMapper json = JsonMapper.builder().build();
 
-    ProxyController(ServerRegistry registry, RoleRegistry roles, SecretStore secrets, OidcLogin login) {
+    ProxyController(ServerRegistry registry, RoleRegistry roles, SecretStore secrets, OidcLogin login, UserProfileStore userProfile) {
         this.registry = registry;
         this.roles = roles;
         this.secrets = secrets;
         this.login = login;
+        this.userProfile = userProfile;
     }
 
     @GetMapping("/api/servers")
@@ -262,9 +265,10 @@ class ProxyController {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST, "The request is not valid JSON");
             return Optional.empty();
         }
-        if (request.has("image") || request.has("env") || request.has("secrets") || request.has("repository")) {
+        if (request.has("image") || request.has("env") || request.has("secrets") || request.has("repository")
+                || request.has("userProfile")) {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-                    "The image, secrets and repository of a session come from its role");
+                    "The image, secrets, userProfile and repository of a session come from its role or configuration");
             return Optional.empty();
         }
         // the page may ask for capabilities and resources itself; the server checks the values
@@ -348,6 +352,26 @@ class ProxyController {
                     role.get().id(), role.get().image() == null ? "default" : role.get().image(), passed.propertyNames(),
                     missingSecrets, role.get().repository() == null ? "none" : role.get().repository(),
                     request.path("capabilities"), request.path("resources"));
+        } else {
+            log.info("Creating a session without role (image default, secrets [], repository none, "
+                    + "capabilities {}, resources {})",
+                    request.path("capabilities"), request.path("resources"));
+        }
+        List<ProfileFile> profileFiles;
+        try {
+            profileFiles = userProfile.load();
+        } catch (IllegalStateException e) {
+            sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+            return Optional.empty();
+        }
+        if (!profileFiles.isEmpty()) {
+            ArrayNode profileArray = request.putArray("userProfile");
+            for (ProfileFile file : profileFiles) {
+                ObjectNode fileNode = profileArray.addObject();
+                fileNode.put("path", file.path());
+                fileNode.put("contentBase64", file.contentBase64());
+                fileNode.put("executable", file.executable());
+            }
         }
         return Optional.of(json.writeValueAsBytes(request));
     }

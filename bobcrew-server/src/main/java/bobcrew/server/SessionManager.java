@@ -1,8 +1,12 @@
 package bobcrew.server;
 
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -75,7 +79,7 @@ public class SessionManager {
      * agent fails
      */
     AgentSession create(Caller caller, String title, String image, Map<String, String> env, Map<String, String> secrets,
-            GitRepository repository,
+            List<ProfileFile> userProfile, GitRepository repository,
             List<String> capabilities, Resources resources) {
         String owner = caller.name();
         List<String> checkedCapabilities = Capabilities.check(capabilities, caller.capabilities());
@@ -83,10 +87,11 @@ public class SessionManager {
         allowedImages.check(chosenImage);
         Map<String, String> checkedEnv = checkEnv(env);
         Map<String, String> checkedSecrets = checkSecrets(secrets);
+        List<ProfileFile> checkedUserProfile = checkUserProfile(userProfile);
         String id = UUID.randomUUID().toString();
         AgentSession session = new AgentSession(new DockerRuntime.ContainerSpec(id, owner, chosenImage, checkedEnv,
                 checkedCapabilities, resources),
-                repository, checkedSecrets, title == null || title.isBlank() ? chosenImage : title.strip(), docker, properties);
+                repository, checkedSecrets, checkedUserProfile, title == null || title.isBlank() ? chosenImage : title.strip(), docker, properties);
         synchronized (this) {
             if (stopping) {
                 throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "The server is shutting down");
@@ -111,8 +116,9 @@ public class SessionManager {
             sessions.remove(session.id());
             throw e;
         }
-        log.info("Session {} created by {} with image {}, environment {}, secrets {}{}", session.id(), owner,
-                chosenImage, checkedEnv.keySet(), checkedSecrets.keySet(), (repository == null ? "" : ", repository " + repository.url())
+        log.info("Session {} created by {} with image {}, environment {}, secrets {}, user-profile {} files{}", session.id(), owner,
+                chosenImage, checkedEnv.keySet(), checkedSecrets.keySet(), checkedUserProfile.size(),
+                (repository == null ? "" : ", repository " + repository.url())
                         + (checkedCapabilities.isEmpty() ? "" : ", capabilities " + checkedCapabilities
                                 + " (privileged)")
                         + ", memory " + (resources.memoryBytes() == null ? "unlimited" : resources.memoryBytes() + " bytes")
@@ -170,6 +176,118 @@ public class SessionManager {
             checked.put(name, value);
         });
         return checked;
+    }
+
+    static final int MAX_PROFILE_FILES = 64;
+    static final int MAX_PROFILE_FILE_BYTES = 256 * 1024;
+    static final int MAX_PROFILE_B64_CHARS = (MAX_PROFILE_FILE_BYTES * 4) / 3 + 4;
+    static final int MAX_PROFILE_TOTAL_BYTES = 1024 * 1024;
+    static final int MAX_PROFILE_PATH_LENGTH = 255;
+    static final int MAX_PROFILE_PATH_SEGMENTS = 16;
+
+    /**
+     * Validates user profile files (paths, counts, base64 encoding, sizes).
+     *
+     * @param userProfile client-supplied list of profile files
+     * @return immutable validated list
+     * @throws ApiException 400 if any validation check fails
+     */
+    static List<ProfileFile> checkUserProfile(List<ProfileFile> userProfile) {
+        if (userProfile == null || userProfile.isEmpty()) {
+            return List.of();
+        }
+        if (userProfile.size() > MAX_PROFILE_FILES) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Too many user profile files (at most "
+                    + MAX_PROFILE_FILES + ")");
+        }
+        Set<String> seenPaths = new HashSet<>();
+        Set<String> dirPaths = new HashSet<>();
+        long totalBytes = 0;
+        List<ProfileFile> checked = new ArrayList<>(userProfile.size());
+
+        for (ProfileFile file : userProfile) {
+            if (file == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Null profile file entry");
+            }
+            String rawPath = file.path();
+            if (rawPath == null || rawPath.isBlank()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid profile file path: empty");
+            }
+            if (rawPath.length() > MAX_PROFILE_PATH_LENGTH) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Profile file path is too long (at most "
+                        + MAX_PROFILE_PATH_LENGTH + " characters): " + rawPath);
+            }
+            for (int i = 0; i < rawPath.length(); i++) {
+                char c = rawPath.charAt(i);
+                if (c < 0x20 || c == 0x7f || c == ':' || c == '\\') {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid characters in profile file path");
+                }
+            }
+            if (rawPath.startsWith("/") || rawPath.endsWith("/")) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Profile file path must be relative without leading or trailing slashes: " + rawPath);
+            }
+            String[] segments = rawPath.split("/", -1);
+            if (segments.length > MAX_PROFILE_PATH_SEGMENTS) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Too many path segments in profile file path: " + rawPath);
+            }
+            StringBuilder currentDir = new StringBuilder();
+            for (int i = 0; i < segments.length; i++) {
+                String seg = segments[i];
+                if (seg.isEmpty() || seg.equals(".") || seg.equals("..")) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid segment in profile file path: " + rawPath);
+                }
+                if (i < segments.length - 1) {
+                    if (currentDir.length() > 0) {
+                        currentDir.append("/");
+                    }
+                    currentDir.append(seg);
+                    dirPaths.add(currentDir.toString());
+                }
+            }
+            Path resolved = Path.of("/home/bob").resolve(rawPath).normalize();
+            if (!resolved.startsWith(Path.of("/home/bob/")) || resolved.equals(Path.of("/home/bob"))) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Profile file path escapes home directory: " + rawPath);
+            }
+            if (rawPath.equals(".bobcrew") || rawPath.startsWith(".bobcrew/")) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Profile file path uses reserved prefix: " + rawPath);
+            }
+            if (!seenPaths.add(rawPath)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Duplicate profile file path: " + rawPath);
+            }
+
+            if (file.contentBase64() == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Missing content for profile file: " + rawPath);
+            }
+            if (file.contentBase64().length() > MAX_PROFILE_B64_CHARS) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Profile file is too large (at most "
+                        + (MAX_PROFILE_FILE_BYTES / 1024) + " KiB): " + rawPath);
+            }
+            byte[] decoded;
+            try {
+                decoded = Base64.getDecoder().decode(file.contentBase64());
+            } catch (IllegalArgumentException e) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid Base64 content for profile file: " + rawPath);
+            }
+            if (decoded.length > MAX_PROFILE_FILE_BYTES) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Profile file is too large (at most "
+                        + (MAX_PROFILE_FILE_BYTES / 1024) + " KiB): " + rawPath);
+            }
+            totalBytes += decoded.length;
+            if (totalBytes > MAX_PROFILE_TOTAL_BYTES) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Total profile files size is too large (at most "
+                        + (MAX_PROFILE_TOTAL_BYTES / 1024) + " KiB)");
+            }
+
+            checked.add(new ProfileFile(rawPath, file.contentBase64(), file.executable()));
+        }
+
+        for (String filePath : seenPaths) {
+            if (dirPaths.contains(filePath)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Profile file path conflicts with a directory of another file: " + filePath);
+            }
+        }
+
+        return List.copyOf(checked);
     }
 
     /**

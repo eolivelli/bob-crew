@@ -31,3 +31,5 @@ bobcrew:
     roles-dir: ${user.home}/.bobcrew/roles
     # The values of the secrets that roles name: one JSON object, readable by its owner only (chmod 600)
     secrets-file: ${user.home}/.bobcrew/secrets.json
+    # Files copied into the container user's home directory (/home/bob); read on each new session
+    user-profile-dir: ${user.home}/.bobcrew/user-profile

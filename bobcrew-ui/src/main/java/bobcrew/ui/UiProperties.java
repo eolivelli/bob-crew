@@ -15,6 +15,7 @@ public record UiProperties(
         String caFile,
         String rolesDir,
         String secretsFile,
+        String userProfileDir,
         Oidc oidc) {
 
     @ConstructorBinding
@@ -22,7 +23,7 @@ public record UiProperties(
     }
 
     public UiProperties(String serverUrl, String token, String tokenFile, String caFile) {
-        this(null, serverUrl, token, tokenFile, caFile, null, null, null);
+        this(null, serverUrl, token, tokenFile, caFile, null, null, null, null);
     }
 
     /**

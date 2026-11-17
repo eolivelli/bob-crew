@@ -453,6 +453,33 @@ class ServerIntegrationTest {
     }
 
     @Test
+    void writesUserProfileFilesIntoHomeDirectory() throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        String settingsXml = "<settings><servers><server><id>central</id></server></servers></settings>";
+        String customScript = "#!/bin/sh\necho custom-script\n";
+        body.put("userProfile", List.of(
+                Map.of("path", ".m2/settings.xml", "contentBase64",
+                        Base64.getEncoder().encodeToString(settingsXml.getBytes(StandardCharsets.UTF_8)),
+                        "executable", false),
+                Map.of("path", "bin/tool.sh", "contentBase64",
+                        Base64.getEncoder().encodeToString(customScript.getBytes(StandardCharsets.UTF_8)),
+                        "executable", true)));
+
+        JsonNode session = create(body);
+        String containerId = session.get("containerId").asString();
+
+        assertThat(execOutput(containerId, "cat", "/home/bob/.m2/settings.xml")).isEqualTo(settingsXml);
+        assertThat(execOutput(containerId, "stat", "-c", "%a %u %F", "/home/bob/.m2/settings.xml",
+                "/home/bob/.m2"))
+            .isEqualTo("600 1000 regular file\n700 1000 directory\n");
+
+        assertThat(execOutput(containerId, "cat", "/home/bob/bin/tool.sh")).isEqualTo(customScript);
+        assertThat(execOutput(containerId, "stat", "-c", "%a %u %F", "/home/bob/bin/tool.sh",
+                "/home/bob/bin"))
+            .isEqualTo("700 1000 regular file\n700 1000 directory\n");
+    }
+
+    @Test
     void refusesCapabilitiesUnlessTheServerAllowsThem() throws Exception {
         JsonNode me = JSON.readTree(send("GET", "/me", null, alice).body());
         assertThat(me.get("capabilities")).isEmpty();

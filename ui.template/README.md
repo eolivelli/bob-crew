@@ -6,6 +6,7 @@ A starting point for `~/.bobcrew/`, the configuration directory of the user who 
 ui.template/
   ui.properties        -> ~/.bobcrew/ui.properties   server URL, token file or Keycloak login, CA
   secrets.json         -> ~/.bobcrew/secrets.json    the secrets roles pass to sessions (empty, mode 600)
+  user-profile/        -> ~/.bobcrew/user-profile/   files synced to /home/bob/ in session containers
   roles/developer.md   -> ~/.bobcrew/roles/developer.md
   roles/power-user.md  -> ~/.bobcrew/roles/power-user.md
 ```
@@ -41,6 +42,10 @@ The file is read each time a session is created, so edits apply at once. A secre
 is left out, and the page says so. Nothing comes from the UI's own environment. Anyone who can use a
 session (you, the users you share it with, admins) can ask its agent for these values, so use tokens with
 the narrowest scope that does the job.
+
+## User profile (`~/.bobcrew/user-profile/`)
+
+Any regular files placed inside `~/.bobcrew/user-profile/` (such as `.m2/settings.xml`, `.gitconfig`, or custom scripts in `bin/`) are automatically copied into `/home/bob/` in the session container before the agent starts (mode 600 for files, mode 700 for executables).
 
 Its prompt asks the agent to work per ticket, on a branch, with unit tests for every change, a full
 build before committing, a **review of each patch by a subagent** before committing, the ticket id in

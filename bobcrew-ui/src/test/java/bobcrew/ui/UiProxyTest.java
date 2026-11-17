@@ -51,11 +51,15 @@ class UiProxyTest {
 
     private static final Path secretsFile;
 
+    private static final Path userProfileDir;
+
     static {
         try {
             Path directory = Files.createTempDirectory("bobcrew-ui-test");
             rolesDir = Files.createDirectory(directory.resolve("roles"));
             secretsFile = directory.resolve("secrets.json");
+            userProfileDir = Files.createDirectory(directory.resolve("user-profile"));
+            Files.setPosixFilePermissions(userProfileDir, PosixFilePermissions.fromString("rwx------"));
             Files.writeString(secretsFile, "{\"GH_TOKEN\": \"secret-gh-token\", \"UNUSED\": \"not-for-this-role\"}");
             Files.setPosixFilePermissions(secretsFile, PosixFilePermissions.fromString("rw-------"));
             Files.writeString(rolesDir.resolve("qa-tester.md"),
@@ -155,6 +159,7 @@ class UiProxyTest {
         registry.add("bobcrew.ui.ca-file", caFile::toString);
         registry.add("bobcrew.ui.roles-dir", rolesDir::toString);
         registry.add("bobcrew.ui.secrets-file", secretsFile::toString);
+        registry.add("bobcrew.ui.user-profile-dir", userProfileDir::toString);
     }
 
     @LocalServerPort
@@ -291,7 +296,7 @@ class UiProxyTest {
     @Test
     void thePageCannotChooseTheImageOrEnvironmentItself() throws Exception {
         for (String body : new String[] {"{\"image\":\"evil/image\"}", "{\"env\":{\"X\":\"1\"}}",
-                "{\"secrets\":{\"X\":\"1\"}}", "{\"role\":\"builder\",\"secrets\":{}}",
+                "{\"secrets\":{\"X\":\"1\"}}", "{\"userProfile\":[]}", "{\"role\":\"builder\",\"secrets\":{}}",
                 "{\"role\":\"builder\",\"env\":{}}", "{\"repository\":{\"url\":\"https://evil.example/x\"}}",
                 "{\"role\":\"cloner\",\"repository\":null}"}) {
             HttpResponse<String> refused = post("/api/sessions", body);
@@ -320,6 +325,26 @@ class UiProxyTest {
             assertThat(post("/api/sessions", "{\"role\":\"qa-tester\"}").statusCode()).isEqualTo(200);
         } finally {
             Files.setPosixFilePermissions(secretsFile, PosixFilePermissions.fromString("rw-------"));
+        }
+    }
+
+    @Test
+    void forwardsUserProfileFilesToUpstreamServer() throws Exception {
+        Path m2Dir = Files.createDirectories(userProfileDir.resolve(".m2"));
+        Path settings = Files.writeString(m2Dir.resolve("settings.xml"), "<settings/>");
+        try {
+            HttpResponse<String> response = post("/api/sessions", "{\"role\":\"builder\"}");
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.body()).contains("\"userProfile\":[{\"path\":\".m2/settings.xml\"");
+            assertThat(response.body()).contains(Base64.getEncoder().encodeToString("<settings/>".getBytes(StandardCharsets.UTF_8)));
+
+            // also forwards for session without a role
+            HttpResponse<String> noRole = post("/api/sessions", "{\"title\":\"my session\"}");
+            assertThat(noRole.statusCode()).isEqualTo(200);
+            assertThat(noRole.body()).contains("\"userProfile\":[{\"path\":\".m2/settings.xml\"");
+        } finally {
+            Files.deleteIfExists(settings);
+            Files.deleteIfExists(m2Dir);
         }
     }
 

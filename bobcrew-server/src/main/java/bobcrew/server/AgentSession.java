@@ -119,6 +119,9 @@ final class AgentSession {
     /** The secrets' values until they are written into the container, then null: the server keeps no copy. */
     private volatile Map<String, String> pendingSecrets;
 
+    /** The user profile files until they are written into the container, then null. */
+    private volatile List<ProfileFile> pendingUserProfile;
+
     /** Why writing the secrets failed, if it did: reported as is rather than as a failure of the agent. */
     private volatile ApiException secretsFailure;
 
@@ -128,11 +131,13 @@ final class AgentSession {
     /**
      * @param repository cloned into the workspace when the session starts, or null
      * @param secrets written as files into the container when it starts (names already checked); kept until then
+     * @param userProfile files written into /home/bob in the container before the agent starts
      */
-    AgentSession(DockerRuntime.ContainerSpec spec, GitRepository repository, Map<String, String> secrets, String title,
-            DockerRuntime docker, BobCrewProperties properties) {
+    AgentSession(DockerRuntime.ContainerSpec spec, GitRepository repository, Map<String, String> secrets,
+            List<ProfileFile> userProfile, String title, DockerRuntime docker, BobCrewProperties properties) {
         this.secretNames = secrets.keySet().stream().sorted().toList();
         this.pendingSecrets = Map.copyOf(secrets);
+        this.pendingUserProfile = userProfile == null ? List.of() : List.copyOf(userProfile);
         this.id = spec.sessionId();
         this.owner = spec.owner();
         this.title = title;
@@ -236,6 +241,7 @@ final class AgentSession {
             throw e;
         } catch (RuntimeException e) {
             pendingSecrets = null;
+            pendingUserProfile = null;
             if (secretsFailure != null) {
                 setStatus(Status.FAILED);
                 shutdown();
@@ -256,9 +262,14 @@ final class AgentSession {
 
     /** Runs once the container has started; its entrypoint waits until this is done. */
     private void writeSecrets(String container) {
+        List<ProfileFile> profile = pendingUserProfile;
+        pendingUserProfile = null;
         Map<String, String> secrets = pendingSecrets;
         pendingSecrets = null;
         try {
+            if (profile != null && !profile.isEmpty()) {
+                docker.writeUserProfile(container, profile, properties.requestTimeout());
+            }
             docker.writeSecrets(container, secrets == null ? Map.of() : secrets, properties.requestTimeout());
         } catch (ApiException e) {
             secretsFailure = e;
