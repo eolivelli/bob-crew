@@ -285,13 +285,16 @@ class ServerIntegrationTest {
         assertThat(request.get("options")).hasSize(3);
         assertThat(request.get("toolCall").get("title").asString()).contains("echo hello");
 
-        String path = "/sessions/" + id + "/permissions/" + toolCallId;
-        assertThat(send("POST", path, "{\"optionId\":\"not-offered\"}", alice).statusCode()).isEqualTo(400);
-        assertThat(send("POST", path, "{\"optionId\":\"allow\"}", token("dave")).statusCode())
+        // real agents' ids contain characters that cannot sit in a path segment
+        assertThat(toolCallId).contains("/");
+        String path = "/sessions/" + id + "/permissions";
+        String body = "{\"toolCallId\":\"" + toolCallId + "\",\"optionId\":\"%s\"}";
+        assertThat(send("POST", path, body.formatted("not-offered"), alice).statusCode()).isEqualTo(400);
+        assertThat(send("POST", path, body.formatted("allow"), token("dave")).statusCode())
             .as("not shared with dave").isEqualTo(404);
         share(id, alice, "dave");
-        assertThat(send("POST", path, "{\"optionId\":\"allow\"}", token("dave")).statusCode()).isEqualTo(204);
-        assertThat(send("POST", path, "{\"optionId\":\"allow\"}", alice).statusCode()).as("already answered")
+        assertThat(send("POST", path, body.formatted("allow"), token("dave")).statusCode()).isEqualTo(204);
+        assertThat(send("POST", path, body.formatted("allow"), alice).statusCode()).as("already answered")
             .isIn(404, 409);
 
         List<JsonNode> rest = events(id, asked.size(), event -> isStatus(event, "IDLE"));

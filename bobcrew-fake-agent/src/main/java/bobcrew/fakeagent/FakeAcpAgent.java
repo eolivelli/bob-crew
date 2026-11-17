@@ -229,7 +229,8 @@ public final class FakeAcpAgent {
 
     /** Returns the text to report, or null if the client cancelled the permission request. */
     private String runTool(String sessionId) throws Exception {
-        String toolCallId = "call-" + UUID.randomUUID();
+        // like Bob's ids, it has "/" and "+" in it: clients must not put it in a URL path
+        String toolCallId = "call-" + UUID.randomUUID() + "/a+b=";
         ObjectNode toolCall = JSON.createObjectNode();
         toolCall.put("sessionUpdate", "tool_call");
         toolCall.put("toolCallId", toolCallId);

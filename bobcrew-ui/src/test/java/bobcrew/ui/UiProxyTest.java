@@ -198,6 +198,8 @@ class UiProxyTest {
         assertThat(get("/app.js").body()).contains("function showRoles").doesNotContain("innerHTML");
         // the agent's command list is not shown as a raw JSON card
         assertThat(get("/app.js").body()).contains("case 'available_commands_update':");
+        // nor is the agent's session title update
+        assertThat(get("/app.js").body()).contains("case 'session_info_update':");
     }
 
     @Test

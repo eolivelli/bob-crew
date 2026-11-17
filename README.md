@@ -468,7 +468,7 @@ All under `/api`, with `Authorization: Bearer <token>`.
 | `POST /sessions/{id}/cancel` | Stops the running turn |
 | `POST /sessions/{id}/clear` `{"wipeWorkspace": true}` | Starts the conversation over (a fresh agent session in the same container, earlier events forgotten); the session stays open. Deletes everything in the workspace unless `wipeWorkspace` is `false` (the body is optional). Only when idle (409 otherwise) |
 | `POST /sessions/{id}/mode` `{"modeId": "..."}` | Switches the agent's mode |
-| `POST /sessions/{id}/permissions/{toolCallId}` `{"optionId": "..."}` | Answers a permission request |
+| `POST /sessions/{id}/permissions` `{"toolCallId": "...", "optionId": "..."}` | Answers a permission request (the tool call id is in the body because agents' ids can contain `/`) |
 | `GET /sessions/{id}/events?after=<seq>` | Server-Sent Events: the session's events after `seq`, then new ones |
 
 The UI app answers two more paths itself, without contacting a server: `GET /api/roles` (`[{"id", "name",

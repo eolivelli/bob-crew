@@ -377,6 +377,9 @@ function renderUpdate(data) {
     case 'available_commands_update':
       // the agent lists its slash commands at session start; the page has no use for them
       break;
+    case 'session_info_update':
+      // the agent's own title and timestamp for the session (the title is a cut-off reply); not shown
+      break;
     default:
       // unknown kinds: pass through visibly rather than dropping them
       add(el('pre', 'card unknown', JSON.stringify(data, null, 2)));
@@ -465,7 +468,7 @@ function renderPermission(request) {
     option.type = 'button';
     option.addEventListener('click', async () => {
       try {
-        await api('POST', sessionApi(`/permissions/${encodeURIComponent(request.toolCallId)}`), { optionId: opt.optionId });
+        await api('POST', sessionApi('/permissions'), { toolCallId: request.toolCallId, optionId: opt.optionId });
       } catch (e) {
         notify(e.message);
       }

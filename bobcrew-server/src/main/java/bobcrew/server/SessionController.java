@@ -71,7 +71,7 @@ class SessionController {
     record ModeRequest(String modeId) {
     }
 
-    record PermissionAnswer(String optionId) {
+    record PermissionAnswer(String toolCallId, String optionId) {
     }
 
     private final SessionManager sessions;
@@ -229,14 +229,20 @@ class SessionController {
         return session.info();
     }
 
-    @PostMapping("/sessions/{id}/permissions/{toolCallId}")
+    /**
+     * The tool call id travels in the body, not the path: agents choose it freely (Bob's contain
+     * {@code /} and {@code +}), and an encoded slash in a path is refused by the web server with 400.
+     */
+    @PostMapping("/sessions/{id}/permissions")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    void answerPermission(@PathVariable String id, @PathVariable String toolCallId,
-            @RequestBody PermissionAnswer answer, Principal principal) {
+    void answerPermission(@PathVariable String id, @RequestBody PermissionAnswer answer, Principal principal) {
+        if (answer.toolCallId() == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "toolCallId is required");
+        }
         if (answer.optionId() == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "optionId is required");
         }
-        sessions.get(principal.getName(), id).answerPermission(principal.getName(), toolCallId, answer.optionId());
+        sessions.get(principal.getName(), id).answerPermission(principal.getName(), answer.toolCallId(), answer.optionId());
     }
 
     /**
