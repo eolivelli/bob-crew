@@ -61,7 +61,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `docker/bob-power/` | bob-java-python plus Docker Engine and Vagrant/libvirt (QEMU from CentOS Stream 9), for sessions with the docker and libvirt capabilities; `root.d/` starts the daemons asked for |
 | `ui.template/` | Starting `~/.bobcrew/` for UI users (`ui.properties`, `roles/developer.md`, `roles/power-user.md`), copied by `scripts/init-ui-config.sh`; `RoleRegistryTest` checks the roles stay valid |
 | `scripts/gen-dev-certs.sh` | Private CA, server certificate and JWT secret for development |
-| `scripts/build-images.sh`, `scripts/push-images.sh` | Build the images; copy images to another machine's Docker over ssh |
+| `scripts/build-images.sh`, `scripts/push-images.sh` | Build the images; copy images to another machine's Docker over ssh, only the layers it lacks (`drop-layers.py` filters the `docker save` archive) |
 
 ### Server classes
 

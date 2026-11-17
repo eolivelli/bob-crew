@@ -69,7 +69,11 @@ scripts/push-images.sh [-i key] user@host bobcrew/bob-java:latest   # or --all f
 ```
 
 `push-images.sh` streams `docker save | gzip` over ssh into `docker load` on the other side, and skips
-images whose ID is already there.
+images whose ID is already there. It sends only the layers the other side lacks: the bottom layers an
+image shares with an image already there are left out of the archive (`scripts/drop-layers.py`), so after
+a rebuild only the changed top layers cross the network. That needs python3 locally and Docker's classic
+image store on the other side; with the containerd image store there, whole images are sent
+(`BOBCREW_PUSH_FULL=true` forces that anywhere).
 
 `bobcrew/bob-base` is Red Hat UBI 9 with Bob Shell (installed with the official installer), git, gh,
 Node.js 22 and Linux Homebrew. Its entrypoint, `bobcrew-entrypoint`, is the contract with the server:
