@@ -234,7 +234,9 @@ the maintainer.
 - The UI app binds to `127.0.0.1` and acts with its one user's token or login; `LocalOnlyFilter` (Host, Origin,
   `Sec-Fetch-Site`, the `X-BobCrew` header on changes) is what stops other web pages from using
   it. New UI endpoints must stay behind it. Its one exception, `GET /login/callback` from another site (Keycloak
-  sends the browser there), must only ever complete a login the UI started.
+  sends the browser there), must only ever complete a login the UI started. It must not redirect to the page:
+  every request of a redirect chain that passed through another site arrives as `Sec-Fetch-Site: cross-site`, so the
+  filter would refuse `/`. It answers with a page whose meta refresh moves on as a same-origin navigation.
 - In `app.js`, text from the agent or from other users is inserted with `textContent` only. No
   `innerHTML`, no inline scripts or styles (the Content-Security-Policy forbids them).
 - `--auto-approve` is not in the default agent command, and the permission timeout rejects.

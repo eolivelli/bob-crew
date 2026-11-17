@@ -17,6 +17,11 @@ import tools.jackson.databind.json.JsonMapper;
  * back to {@code /login/callback}; {@code /logout} ends the login here and at the provider; {@code /api/login} tells
  * the page whether there is one. All behind {@link LocalOnlyFilter}, which lets only the callback come from another
  * site, since the provider sends the browser there.
+ *
+ * <p>The callback never redirects to the page: browsers mark every request of a redirect chain that went through
+ * another site as {@code Sec-Fetch-Site: cross-site}, so {@code /} reached that way would be refused by the filter. It
+ * answers with a small page that moves on by itself ({@link #continueToPage}); that navigation starts from this UI's
+ * own page, so it arrives as same-origin.
  */
 @RestController
 class LoginController {
@@ -64,12 +69,12 @@ class LoginController {
         }
         if (state == null && code == null && error == null) {
             // back from the provider's logout
-            redirect(response, "/");
+            continueToPage(response, "Logged out.");
             return;
         }
         try {
             if (login.finish(state, code, error)) {
-                redirect(response, "/");
+                continueToPage(response, "Logged in.");
             } else {
                 plain(response, HttpServletResponse.SC_BAD_REQUEST, "The login did not complete (it was cancelled, "
                         + "took too long, or did not start here). Go back to the bob-crew page and log in again.");
@@ -104,6 +109,19 @@ class LoginController {
         response.setStatus(HttpServletResponse.SC_FOUND);
         response.setHeader("Location", location);
         response.setHeader("Cache-Control", "no-store");
+    }
+
+    /**
+     * A page that takes the browser to {@code /} with a meta refresh (the Content-Security-Policy forbids scripts),
+     * so that it gets there as a same-origin navigation; a link too, for browsers that do not refresh.
+     */
+    private static void continueToPage(HttpServletResponse response, String message) throws IOException {
+        response.setStatus(HttpServletResponse.SC_OK);
+        response.setContentType("text/html;charset=UTF-8");
+        response.setHeader("Cache-Control", "no-store");
+        response.getWriter().write("<!doctype html><html><head><meta charset=\"utf-8\">"
+                + "<meta http-equiv=\"refresh\" content=\"0; url=/\"><title>bob-crew</title></head>"
+                + "<body><p>" + message + " <a href=\"/\">Continue to bob-crew</a></p></body></html>");
     }
 
     private static void plain(HttpServletResponse response, int status, String message) throws IOException {

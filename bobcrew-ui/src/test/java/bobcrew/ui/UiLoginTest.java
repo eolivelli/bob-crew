@@ -102,8 +102,12 @@ class UiLoginTest {
         // the provider sends the browser back: a navigation from another site
         HttpResponse<String> back = get("/login/callback?state=" + query.get("state") + "&code="
                 + FakeOidcProvider.CODE, Map.of("Sec-Fetch-Site", "cross-site"));
-        assertThat(back.statusCode()).isEqualTo(302);
-        assertThat(back.headers().firstValue("Location")).hasValue("/");
+        // not a redirect: "/" reached through a chain from another site would arrive as cross-site and be refused
+        assertThat(back.statusCode()).isEqualTo(200);
+        assertThat(back.headers().firstValue("Location")).isEmpty();
+        assertThat(back.body()).contains("<meta http-equiv=\"refresh\" content=\"0; url=/\">");
+        // the page's refresh is a navigation from the UI itself
+        assertThat(get("/", Map.of("Sec-Fetch-Site", "same-origin")).statusCode()).isEqualTo(200);
         assertThat(get("/api/login", Map.of()).body()).contains("\"loggedIn\":true");
 
         HttpResponse<String> me = get("/api/me", Map.of());
@@ -130,7 +134,8 @@ class UiLoginTest {
 
         // back from the provider's logout
         HttpResponse<String> loggedOut = get("/login/callback", Map.of("Sec-Fetch-Site", "cross-site"));
-        assertThat(loggedOut.statusCode()).isEqualTo(302);
+        assertThat(loggedOut.statusCode()).isEqualTo(200);
+        assertThat(loggedOut.body()).contains("url=/");
     }
 
     @Test

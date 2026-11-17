@@ -147,7 +147,8 @@ class UiKeycloakIntegrationTest {
         // the browser comes back from Keycloak: a navigation from another site
         HttpResponse<String> back = browser.send(HttpRequest.newBuilder(callback).header("Sec-Fetch-Site", "cross-site")
             .build(), HttpResponse.BodyHandlers.ofString());
-        assertThat(back.statusCode()).as(back.body()).isEqualTo(302);
+        assertThat(back.statusCode()).as(back.body()).isEqualTo(200);
+        assertThat(back.body()).contains("url=/");
 
         HttpResponse<String> me = get(URI.create("http://127.0.0.1:" + port + "/api/me"));
         assertThat(me.statusCode()).as(me.body()).isEqualTo(200);
