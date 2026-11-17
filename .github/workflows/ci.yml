@@ -1,6 +1,6 @@
 # Builds everything and runs all tests: the server's integration tests start the fake agent in real Docker
 # containers (the runner's Docker; they build bobcrew-fake-agent:test first, which pulls its base image),
-# and the UI's JavaScript tests run with Node.
+# the OpenID Connect tests a real Keycloak, and the UI's JavaScript tests run with Node.
 name: CI
 
 on:
@@ -35,6 +35,10 @@ jobs:
 
       - name: Docker
         run: docker version
+
+      - name: Keycloak image
+        # the version TestKeycloak pins; pulled here so that a slow pull is not a slow test
+        run: docker pull --quiet "$(sed -n 's/.*String IMAGE = "\(.*\)";/\1/p' bobcrew-test-support/src/main/java/bobcrew/testsupport/TestKeycloak.java)"
 
       - name: Build and test
         # fail, rather than skip, the Docker tests if Docker does not work here

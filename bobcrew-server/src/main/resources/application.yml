@@ -93,14 +93,39 @@ bobcrew:
   # docker.user. Users of such sessions can become root on this Docker host: allow them only for users you
   # trust with that. None by default.
   allowed-capabilities: ${BOBCREW_ALLOWED_CAPABILITIES:}
-  # Users (token subjects, comma separated) who may see, use and close every session. Everyone else sees only
-  # the sessions they created and those shared with them.
+  # Users (user names, comma separated) who may see, use and close every session, besides those with the
+  # identity provider's admin role. Everyone else sees only the sessions they created and those shared with them.
   admin-users: ${BOBCREW_ADMIN_USERS:}
   auth:
+    # Tokens made with issue-token, signed with this secret (HS256); empty to accept none
     jwt-secret-file: ${BOBCREW_JWT_SECRET_FILE:}
     revoked-jti-file: ${BOBCREW_REVOKED_JTI_FILE:}
     issuer: bobcrew
     audience: bobcrew-api
+    # Tokens from an OpenID Connect provider (Keycloak, realm keycloak/bobcrew-realm.json). At least one of
+    # jwt-secret-file and oidc.issuer-uri must be set; with both, either kind of token is accepted.
+    oidc:
+      # The realm's issuer, exactly as in its tokens, such as https://keycloak.example:8543/realms/bobcrew; the
+      # server fetches its keys from there, so it must be reachable at that address
+      issuer-uri: ${BOBCREW_OIDC_ISSUER_URI:}
+      # PEM certificates to trust for the provider's HTTPS instead of the JDK's (a private CA)
+      ca-file: ${BOBCREW_OIDC_CA_FILE:}
+      # What the token's aud must contain
+      audience: bobcrew-api
+      # The claim with the user name, and the (dotted) path to the user's roles
+      username-claim: ${BOBCREW_OIDC_USERNAME_CLAIM:preferred_username}
+      roles-claim: realm_access.roles
+      # The role a user needs to use this server at all (empty: everyone the provider accepts), the role that
+      # makes an admin, and the prefix of the roles that allow capabilities (bobcrew-cap-docker allows docker,
+      # if allowed-capabilities has it too)
+      access-role: ${BOBCREW_OIDC_ACCESS_ROLE:bobcrew-user}
+      admin-role: ${BOBCREW_OIDC_ADMIN_ROLE:bobcrew-admin}
+      capability-role-prefix: bobcrew-cap-
+  limits:
+    # The most a user's own limits from the identity provider (bobcrew_max_memory, bobcrew_max_cpus) can give one
+    # session; empty or 0: the Docker host's total memory and CPUs
+    ceiling-memory: ${BOBCREW_CEILING_MEMORY:}
+    ceiling-cpus: ${BOBCREW_CEILING_CPUS:0}
 
 logging:
   level:

@@ -26,6 +26,7 @@
 
     <modules>
         <module>bobcrew-fake-agent</module>
+        <module>bobcrew-test-support</module>
         <module>bobcrew-server</module>
         <module>bobcrew-ui</module>
     </modules>
@@ -63,6 +64,11 @@
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-compress</artifactId>
                 <version>${commons-compress.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>bobcrew</groupId>
+                <artifactId>bobcrew-test-support</artifactId>
+                <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>bobcrew</groupId>

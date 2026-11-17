@@ -49,42 +49,36 @@ public class SessionManager {
 
     private volatile boolean stopping;
 
-    private final List<String> allowedCapabilities;
-
     private final AllowedImages allowedImages;
 
     SessionManager(BobCrewProperties properties, DockerRuntime docker, SessionAccessPolicy accessPolicy) {
         this.properties = properties;
         this.docker = docker;
         this.accessPolicy = accessPolicy;
-        this.allowedCapabilities = Capabilities.allowed(properties.allowedCapabilities());
         this.allowedImages = new AllowedImages(properties.docker().allowedImages(), docker.defaultImage());
         log.info("Agent: {}", properties.agent());
     }
 
-    /** The capabilities sessions may ask for on this server. */
-    List<String> allowedCapabilities() {
-        return allowedCapabilities;
-    }
-
     /**
-     * Creates a session owned by {@code owner} and starts its agent in a new container.
+     * Creates a session owned by {@code caller} and starts its agent in a new container.
      * @param image the image to run; null or blank for the server's default image
      * @param env environment variables for the container; nothing else from the client or the server's own
      * environment gets in (the server adds the API key)
      * @param secrets written as files into the container's {@link DockerRuntime#SECRETS_DIR}, never into its
      * environment; null or empty for none
      * @param repository cloned into the workspace before the agent's session starts, or null
-     * @param capabilities what the agent may run besides commands ({@link Capabilities}); null or empty for none
-     * @param resources the container's limits, already checked ({@link Resources#of})
+     * @param capabilities what the agent may run besides commands ({@link Capabilities}); null or empty for none.
+     * Only those the caller may use ({@link Caller#capabilities()}).
+     * @param resources the container's limits, already checked against the caller's ({@link Resources#of})
      * @throws ApiException 400 for a bad image, environment, repository or capability, 403 for an image or a
-     * capability the server does not allow, 429 when the server or the user's share of it is full, 502 if the
+     * capability the caller may not use, 429 when the server or the user's share of it is full, 502 if the
      * agent fails
      */
-    AgentSession create(String owner, String title, String image, Map<String, String> env, Map<String, String> secrets,
+    AgentSession create(Caller caller, String title, String image, Map<String, String> env, Map<String, String> secrets,
             GitRepository repository,
             List<String> capabilities, Resources resources) {
-        List<String> checkedCapabilities = Capabilities.check(capabilities, allowedCapabilities);
+        String owner = caller.name();
+        List<String> checkedCapabilities = Capabilities.check(capabilities, caller.capabilities());
         String chosenImage = image == null || image.isBlank() ? docker.defaultImage() : image.strip();
         allowedImages.check(chosenImage);
         Map<String, String> checkedEnv = checkEnv(env);
@@ -102,12 +96,12 @@ public class SessionManager {
                 throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "The server already runs "
                         + properties.maxSessions() + " sessions; close one first");
             }
-            int perUser = properties.maxSessionsPerUser();
+            int perUser = caller.limits().maxSessions();
             if (perUser > 0 && sessions.values().stream()
                 .filter(other -> isActive(other) && owner.equals(other.owner()))
                 .count() >= perUser) {
                 throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "You already have " + perUser
-                        + " open sessions, the most this server allows per user; close one first");
+                        + " open sessions, the most you may have on this server; close one first");
             }
             sessions.put(session.id(), session);
         }
@@ -182,27 +176,23 @@ public class SessionManager {
      * @throws ApiException 404 if there is no such session or the user may not use it: a session someone else
      * has not shared with you does not exist, as far as you can tell
      */
-    AgentSession get(String user, String id) {
+    AgentSession get(Caller caller, String id) {
         AgentSession session = sessions.get(id);
-        if (session == null || !accessPolicy.canUse(user, session)) {
+        if (session == null || !accessPolicy.canUse(caller, session)) {
             throw new ApiException(HttpStatus.NOT_FOUND, "No such session");
         }
         return session;
     }
 
-    /** Whether {@code user} may still use {@code session}: sharing can be withdrawn while a client follows it. */
-    boolean canUse(String user, AgentSession session) {
-        return accessPolicy.canUse(user, session);
+    /** Whether {@code caller} may still use {@code session}: sharing can be withdrawn while a client follows it. */
+    boolean canUse(Caller caller, AgentSession session) {
+        return accessPolicy.canUse(caller, session);
     }
 
-    boolean isAdmin(String user) {
-        return accessPolicy.isAdmin(user);
-    }
-
-    /** @throws ApiException 404 as {@link #get}, 403 if the user may use the session but not {@code action} */
-    private AgentSession getToManage(String user, String id, String action) {
-        AgentSession session = get(user, id);
-        if (!accessPolicy.canManage(user, session)) {
+    /** @throws ApiException 404 as {@link #get}, 403 if the caller may use the session but not {@code action} */
+    private AgentSession getToManage(Caller caller, String id, String action) {
+        AgentSession session = get(caller, id);
+        if (!accessPolicy.canManage(caller, session)) {
             throw new ApiException(HttpStatus.FORBIDDEN, "Only the session's owner can " + action);
         }
         return session;
@@ -213,8 +203,8 @@ public class SessionManager {
      * owner or an admin may.
      * @throws ApiException 400 for a bad list, 403 if the user may not, 404 as {@link #get}
      */
-    AgentSession.Info share(String user, String id, List<String> users) {
-        AgentSession session = getToManage(user, id, "change who it is shared with");
+    AgentSession.Info share(Caller caller, String id, List<String> users) {
+        AgentSession session = getToManage(caller, id, "change who it is shared with");
         if (users == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "users is required: the names to share with, or []");
         }
@@ -232,26 +222,26 @@ public class SessionManager {
                 checked.add(trimmed);
             }
         }
-        session.share(user, checked);
-        log.info("Session {} shared by {} with {}", id, user, checked.isEmpty() ? "nobody" : checked);
+        session.share(caller.name(), checked);
+        log.info("Session {} shared by {} with {}", id, caller.name(), checked.isEmpty() ? "nobody" : checked);
         return session.info();
     }
 
-    List<AgentSession.Info> list(String user) {
+    List<AgentSession.Info> list(Caller caller) {
         return sessions.values()
             .stream()
-            .filter(session -> accessPolicy.canUse(user, session))
+            .filter(session -> accessPolicy.canUse(caller, session))
             .map(AgentSession::info)
             .sorted(Comparator.comparing(AgentSession.Info::createdAt).reversed())
             .toList();
     }
 
     /** Closes the session, removes its container and forgets it. Only its owner or an admin may. */
-    void close(String user, String id) {
-        AgentSession session = getToManage(user, id, "close it");
+    void close(Caller caller, String id) {
+        AgentSession session = getToManage(caller, id, "close it");
         session.close();
         sessions.remove(id);
-        log.info("Session {} closed by {}", id, user);
+        log.info("Session {} closed by {}", id, caller.name());
     }
 
     /**
@@ -259,16 +249,16 @@ public class SessionManager {
      * session stays open.
      * @throws ApiException 409 if busy
      */
-    AgentSession.Info clear(String user, String id, boolean wipeWorkspace) {
-        AgentSession session = get(user, id);
-        AgentSession.Info info = session.clear(user, wipeWorkspace);
-        log.info("Session {} cleared by {}{}", id, user, wipeWorkspace ? "; workspace wiped" : "");
+    AgentSession.Info clear(Caller caller, String id, boolean wipeWorkspace) {
+        AgentSession session = get(caller, id);
+        AgentSession.Info info = session.clear(caller.name(), wipeWorkspace);
+        log.info("Session {} cleared by {}{}", id, caller.name(), wipeWorkspace ? "; workspace wiped" : "");
         return info;
     }
 
     /** A snapshot of the session container's resource use. */
-    ContainerMetrics metrics(String user, String id) {
-        return get(user, id).metrics();
+    ContainerMetrics metrics(Caller caller, String id) {
+        return get(caller, id).metrics();
     }
 
     @Scheduled(fixedDelay = 60_000)

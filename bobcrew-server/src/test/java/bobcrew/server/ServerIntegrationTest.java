@@ -460,7 +460,7 @@ class ServerIntegrationTest {
         assertThat(me.get("maxCpus").asDouble()).isEqualTo(2.0);
         HttpResponse<String> response = send("POST", "/sessions", "{\"capabilities\":[\"docker\"]}", alice);
         assertThat(response.statusCode()).isEqualTo(403);
-        assertThat(response.body()).contains("does not allow the docker capability");
+        assertThat(response.body()).contains("may not use the docker capability");
         assertThat(createStatus(Map.of("capabilities", List.of("root")))).isEqualTo(400);
         assertThat(TestDocker.client().listContainersCmd().withShowAll(true)
             .withLabelFilter(Map.of(DockerRuntime.LABEL_INSTANCE, instanceId)).exec()).isEmpty();
@@ -620,7 +620,7 @@ class ServerIntegrationTest {
         createSession("limit-2");
         HttpResponse<String> response = send("POST", "/sessions", "{\"title\":\"limit-3\"}", alice);
         assertThat(response.statusCode()).as("alice's share is full").isEqualTo(429);
-        assertThat(response.body()).contains("per user");
+        assertThat(response.body()).contains("open sessions, the most you may have");
 
         response = send("POST", "/sessions", "{\"title\":\"bob's\"}", token("bob"));
         assertThat(response.statusCode()).as(response.body()).isEqualTo(201);

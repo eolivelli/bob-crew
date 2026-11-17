@@ -28,8 +28,9 @@ import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * Forwards {@code /api/**} to the appropriate bob-crew server, adding that server's token. The browser
- * never sees the token, and the server needs no CORS. Responses are streamed through as they arrive,
+ * Forwards {@code /api/**} to the appropriate bob-crew server, adding that server's token, or the logged-in user's
+ * ({@link OidcLogin}). The browser never sees a token, and the server needs no CORS. Without a login, it answers
+ * 401 with {@code {"login": "/login"}}, for the page to offer one. Responses are streamed through as they arrive,
  * which is what keeps the Server-Sent Events of a session flowing.
  *
  * <p>Creating a session is the one request it rewrites: the browser names a {@code role}, and the request
@@ -72,12 +73,15 @@ class ProxyController {
 
     private final SecretStore secrets;
 
+    private final OidcLogin login;
+
     private final JsonMapper json = JsonMapper.builder().build();
 
-    ProxyController(ServerRegistry registry, RoleRegistry roles, SecretStore secrets) {
+    ProxyController(ServerRegistry registry, RoleRegistry roles, SecretStore secrets, OidcLogin login) {
         this.registry = registry;
         this.roles = roles;
         this.secrets = secrets;
+        this.login = login;
     }
 
     @GetMapping("/api/servers")
@@ -127,6 +131,25 @@ class ProxyController {
             forwardedPath = path;
         }
 
+        String token = server.token();
+        if (token == null) {
+            try {
+                token = login.currentToken();
+            } catch (IOException e) {
+                log.warn("Cannot reach the identity provider to refresh the login: {}", e.toString());
+                sendError(response, HttpServletResponse.SC_BAD_GATEWAY, "Cannot reach the identity provider: "
+                        + e.getMessage());
+                return;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (token == null) {
+                sendLogin(response, "Log in to continue");
+                return;
+            }
+        }
+
         String query = request.getQueryString();
         URI target = URI.create(server.baseUri() + forwardedPath + (query == null ? "" : "?" + query));
 
@@ -158,7 +181,7 @@ class ProxyController {
         boolean stream = path.endsWith("/events");
         HttpRequest.Builder forwarded = HttpRequest.newBuilder(target)
             .method(request.getMethod(), publisher)
-            .header("Authorization", "Bearer " + server.token());
+            .header("Authorization", "Bearer " + token);
         if (!stream) {
             forwarded.timeout(upload ? UPLOAD_TIMEOUT : create ? CREATE_TIMEOUT : Duration.ofSeconds(120));
         }
@@ -183,8 +206,13 @@ class ProxyController {
 
         try (InputStream in = upstream.body()) {
             if (upstream.statusCode() == HttpServletResponse.SC_UNAUTHORIZED) {
-                sendError(response, HttpServletResponse.SC_BAD_GATEWAY,
-                        "The bob-crew server rejected the configured token (expired, revoked or wrong)");
+                if (server.token() == null) {
+                    sendLogin(response, "The bob-crew server " + server.name() + " did not accept your login; "
+                            + "log in again, or check that it trusts the same identity provider as this UI");
+                } else {
+                    sendError(response, HttpServletResponse.SC_BAD_GATEWAY,
+                            "The bob-crew server rejected the configured token (expired, revoked or wrong)");
+                }
                 return;
             }
             response.setStatus(upstream.statusCode());
@@ -322,6 +350,13 @@ class ProxyController {
                     request.path("capabilities"), request.path("resources"));
         }
         return Optional.of(json.writeValueAsBytes(request));
+    }
+
+    /** 401, and where the page sends the user to log in. */
+    private void sendLogin(HttpServletResponse response, String message) throws IOException {
+        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        response.setContentType("application/json");
+        response.getOutputStream().write(json.writeValueAsBytes(Map.of("error", message, "login", "/login")));
     }
 
     private static void sendError(HttpServletResponse response, int status, String message) throws IOException {

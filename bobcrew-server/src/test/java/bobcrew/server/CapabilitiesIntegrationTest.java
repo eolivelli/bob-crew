@@ -94,7 +94,7 @@ class CapabilitiesIntegrationTest {
     void refusesACapabilityTheServerDoesNotAllow() throws Exception {
         HttpResponse<String> response = send("POST", "/sessions", "{\"capabilities\":[\"docker\",\"libvirt\"]}");
         assertThat(response.statusCode()).isEqualTo(403);
-        assertThat(response.body()).contains("does not allow the libvirt capability");
+        assertThat(response.body()).contains("may not use the libvirt capability");
     }
 
     @Test

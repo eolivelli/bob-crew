@@ -13,7 +13,11 @@
 <aside id="sidebar">
   <header>
     <h1>bob-crew</h1>
-    <span id="me"></span>
+    <span class="who">
+      <span id="me"></span>
+      <span id="admin-badge" class="badge" hidden title="You may see, use and close every session">admin</span>
+      <a id="logout" href="/logout" hidden title="Log out here and at the identity provider">Log out</a>
+    </span>
   </header>
   <form id="new-session">
     <select id="new-server" required title="Server"></select>
@@ -71,6 +75,12 @@
     <dl id="metrics-list"></dl>
   </section>
   <div id="notice" hidden></div>
+  <section id="login-view" hidden>
+    <p id="login-message"></p>
+    <p><a id="login-link" class="button" href="/login">Log in</a></p>
+    <p class="hint">You log in with your organization's identity provider; this UI keeps the login in memory, never
+      in the browser, until you log out or stop it.</p>
+  </section>
   <dialog id="clear-dialog">
     <form method="dialog">
       <p>Start the conversation over? The session stays open, in the same container.</p>
