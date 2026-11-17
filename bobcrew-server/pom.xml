@@ -51,6 +51,12 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <!-- a real Keycloak for the OpenID Connect tests -->
+            <groupId>bobcrew</groupId>
+            <artifactId>bobcrew-test-support</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <!-- the self-contained jar, copied into the test image (src/test/docker/fake-agent) -->
             <groupId>bobcrew</groupId>
             <artifactId>bobcrew-fake-agent</artifactId>

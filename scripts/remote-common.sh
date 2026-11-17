@@ -2,7 +2,7 @@
 #
 # Settings (environment):
 #   BOBCREW_REMOTE_DIR   directory on the remote machine, relative to its home   (default: bobcrew)
-#   BOBCREW_REMOTE_PORT  port the remote server listens on, on its loopback only (default: 8443)
+#   BOBCREW_REMOTE_PORT  port the remote server listens on (default: 8443)
 
 REMOTE_DIR="${BOBCREW_REMOTE_DIR:-bobcrew}"
 REMOTE_PORT="${BOBCREW_REMOTE_PORT:-8443}"
@@ -40,6 +40,14 @@ parse_target() {
 
 rssh() { ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
 rscp() { scp -q "${SSH_OPTS[@]}" "$@"; }
+
+# check_keycloak issuer [ca-file]: dies unless the issuer looks like a Keycloak realm's, over https, and the CA
+# file (if given) exists.
+check_keycloak() {
+  [[ "$1" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/realms/[A-Za-z0-9._-]+$ ]] \
+    || die "--keycloak takes the realm's issuer, such as https://keycloak.example:8543/realms/bobcrew"
+  [[ -z "${2:-}" || -f "$2" ]] || die "CA file not found: $2"
+}
 
 # Closes the shared connection opened by the first ssh call.
 close_ssh() { ssh "${SSH_OPTS[@]}" -O exit "$TARGET" 2>/dev/null || true; }

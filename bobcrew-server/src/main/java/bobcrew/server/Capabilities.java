@@ -51,7 +51,7 @@ final class Capabilities {
 
     /**
      * @return the requested capabilities, sorted, without duplicates; empty for none
-     * @throws ApiException 400 for an unknown capability, 403 for one the server does not allow
+     * @throws ApiException 400 for an unknown capability, 403 for one not in {@code allowed}
      */
     static List<String> check(List<String> requested, List<String> allowed) {
         if (requested == null || requested.isEmpty()) {
@@ -64,8 +64,8 @@ final class Capabilities {
                         + String.join(", ", KNOWN) + ")");
             }
             if (!allowed.contains(name)) {
-                throw new ApiException(HttpStatus.FORBIDDEN, "This server does not allow the " + name
-                        + " capability");
+                throw new ApiException(HttpStatus.FORBIDDEN, "You may not use the " + name
+                        + " capability on this server");
             }
             checked.add(name);
         }

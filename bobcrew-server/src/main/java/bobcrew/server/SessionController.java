@@ -3,7 +3,6 @@ package bobcrew.server;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.security.Principal;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -26,7 +25,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import tools.jackson.databind.json.JsonMapper;
 
-/** The HTTP API. The user is the subject of the request's token. */
+/** The HTTP API. The caller ({@link Caller}) comes from the request's token. */
 @RestController
 @RequestMapping("/api")
 class SessionController {
@@ -87,30 +86,32 @@ class SessionController {
     }
 
     /**
-     * The caller, and what this server lets sessions ask for: {@code capabilities}, and the caps on resource
-     * requests ({@code maxMemoryBytes}, {@code maxCpus}; null for none).
+     * The caller, and what this server lets their sessions ask for: {@code capabilities}, the caps on resource
+     * requests ({@code maxMemoryBytes}, {@code maxCpus}; null for none) and how many sessions they may have open
+     * ({@code maxSessions}; 0 for no limit of their own). {@code issuer} is {@code oidc} for a token from the
+     * identity provider, {@code token} for one made with {@code issue-token}.
      */
     @GetMapping("/me")
-    Map<String, Object> me(Principal principal) {
+    Map<String, Object> me(Caller caller) {
         Map<String, Object> me = new java.util.LinkedHashMap<>();
-        me.put("user", principal.getName());
-        me.put("admin", sessions.isAdmin(principal.getName()));
-        me.put("capabilities", sessions.allowedCapabilities());
-        BobCrewProperties.Docker docker = properties.docker();
-        me.put("maxMemoryBytes", docker.maxMemory() == null || docker.maxMemory().toBytes() <= 0 ? null
-                : docker.maxMemory().toBytes());
-        me.put("maxCpus", docker.maxCpus() > 0 ? docker.maxCpus() : null);
+        me.put("user", caller.name());
+        me.put("admin", caller.admin());
+        me.put("issuer", caller.source().name().toLowerCase(java.util.Locale.ROOT));
+        me.put("capabilities", caller.capabilities());
+        me.put("maxSessions", caller.limits().maxSessions());
+        me.put("maxMemoryBytes", caller.limits().maxMemoryBytes());
+        me.put("maxCpus", caller.limits().maxCpus());
         return me;
     }
 
     @GetMapping("/sessions")
-    List<AgentSession.Info> list(Principal principal) {
-        return sessions.list(principal.getName());
+    List<AgentSession.Info> list(Caller caller) {
+        return sessions.list(caller);
     }
 
     @PostMapping("/sessions")
     @ResponseStatus(HttpStatus.CREATED)
-    AgentSession.Info create(@RequestBody CreateRequest request, Principal principal) {
+    AgentSession.Info create(@RequestBody CreateRequest request, Caller caller) {
         String title = request.title();
         if (title != null && title.length() > 200) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "The title is too long");
@@ -118,25 +119,26 @@ class SessionController {
         GitRepository repository = request.repository() == null ? null
                 : GitRepository.of(request.repository().url(), request.repository().branch(),
                         properties.git().allowedSchemes());
-        Resources resources = request.resources() == null ? Resources.of(null, null, properties.docker())
-                : Resources.of(request.resources().memory(), request.resources().cpus(), properties.docker());
-        return sessions.create(principal.getName(), title, request.image(), request.env(), request.secrets(), repository,
+        Resources resources = request.resources() == null ? Resources.of(null, null, properties.docker(), caller.limits())
+                : Resources.of(request.resources().memory(), request.resources().cpus(), properties.docker(),
+                        caller.limits());
+        return sessions.create(caller, title, request.image(), request.env(), request.secrets(), repository,
                 request.capabilities(), resources).info();
     }
 
     @GetMapping("/sessions/{id}")
-    AgentSession.Info get(@PathVariable String id, Principal principal) {
-        return sessions.get(principal.getName(), id).info();
+    AgentSession.Info get(@PathVariable String id, Caller caller) {
+        return sessions.get(caller, id).info();
     }
 
     @GetMapping("/sessions/{id}/file")
     void downloadFile(@PathVariable String id, @RequestParam(value = "path", required = false) String rawPath,
-            Principal principal,
+            Caller caller,
             HttpServletResponse response) throws IOException {
         if (!properties.fileDownloadsEnabled()) {
             throw new ApiException(HttpStatus.FORBIDDEN, "File downloads are disabled on this server");
         }
-        AgentSession session = sessions.get(principal.getName(), id);
+        AgentSession session = sessions.get(caller, id);
         try (DockerRuntime.ContainerFile file = session.readFile(rawPath)) {
             response.setStatus(HttpStatus.OK.value());
             response.setContentType("application/octet-stream");
@@ -155,7 +157,7 @@ class SessionController {
     @PutMapping("/sessions/{id}/files")
     @ResponseStatus(HttpStatus.CREATED)
     AgentSession.Upload upload(@PathVariable String id, @RequestParam(value = "path", required = false) String path,
-            Principal principal, HttpServletRequest request) throws IOException {
+            Caller caller, HttpServletRequest request) throws IOException {
         if (!properties.fileUploadsEnabled()) {
             throw new ApiException(HttpStatus.FORBIDDEN, "File uploads are disabled on this server");
         }
@@ -164,14 +166,14 @@ class SessionController {
             throw new ApiException(HttpStatus.CONTENT_TOO_LARGE, "The file is larger than the server accepts ("
                     + max / (1024 * 1024) + " MB)");
         }
-        AgentSession session = sessions.get(principal.getName(), id);
-        return session.upload(principal.getName(), path, request.getInputStream(), max);
+        AgentSession session = sessions.get(caller, id);
+        return session.upload(caller.name(), path, request.getInputStream(), max);
     }
 
     /** A snapshot of the session container's resource use; Docker samples for a second or two. */
     @GetMapping("/sessions/{id}/metrics")
-    ContainerMetrics metrics(@PathVariable String id, Principal principal) {
-        return sessions.metrics(principal.getName(), id);
+    ContainerMetrics metrics(@PathVariable String id, Caller caller) {
+        return sessions.metrics(caller, id);
     }
 
     /**
@@ -179,19 +181,19 @@ class SessionController {
      * the owner or an admin may.
      */
     @PutMapping("/sessions/{id}/sharing")
-    AgentSession.Info share(@PathVariable String id, @RequestBody ShareRequest request, Principal principal) {
-        return sessions.share(principal.getName(), id, request.users());
+    AgentSession.Info share(@PathVariable String id, @RequestBody ShareRequest request, Caller caller) {
+        return sessions.share(caller, id, request.users());
     }
 
     @DeleteMapping("/sessions/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    void close(@PathVariable String id, Principal principal) {
-        sessions.close(principal.getName(), id);
+    void close(@PathVariable String id, Caller caller) {
+        sessions.close(caller, id);
     }
 
     @PostMapping("/sessions/{id}/prompt")
     @ResponseStatus(HttpStatus.ACCEPTED)
-    void prompt(@PathVariable String id, @RequestBody PromptRequest request, Principal principal) {
+    void prompt(@PathVariable String id, @RequestBody PromptRequest request, Caller caller) {
         String text = request.text();
         if (text == null || text.isBlank()) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "The prompt must not be empty");
@@ -199,13 +201,13 @@ class SessionController {
         if (text.length() > MAX_PROMPT_LENGTH) {
             throw new ApiException(HttpStatus.CONTENT_TOO_LARGE, "The prompt is too long");
         }
-        sessions.get(principal.getName(), id).prompt(principal.getName(), text);
+        sessions.get(caller, id).prompt(caller.name(), text);
     }
 
     @PostMapping("/sessions/{id}/cancel")
     @ResponseStatus(HttpStatus.ACCEPTED)
-    void cancel(@PathVariable String id, Principal principal) {
-        sessions.get(principal.getName(), id).cancel();
+    void cancel(@PathVariable String id, Caller caller) {
+        sessions.get(caller, id).cancel();
     }
 
     /**
@@ -214,17 +216,17 @@ class SessionController {
      */
     @PostMapping("/sessions/{id}/clear")
     AgentSession.Info clear(@PathVariable String id, @RequestBody(required = false) ClearRequest request,
-            Principal principal) {
+            Caller caller) {
         boolean wipe = request == null || request.wipeWorkspace() == null || request.wipeWorkspace();
-        return sessions.clear(principal.getName(), id, wipe);
+        return sessions.clear(caller, id, wipe);
     }
 
     @PostMapping("/sessions/{id}/mode")
-    AgentSession.Info mode(@PathVariable String id, @RequestBody ModeRequest request, Principal principal) {
+    AgentSession.Info mode(@PathVariable String id, @RequestBody ModeRequest request, Caller caller) {
         if (request.modeId() == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "modeId is required");
         }
-        AgentSession session = sessions.get(principal.getName(), id);
+        AgentSession session = sessions.get(caller, id);
         session.setMode(request.modeId());
         return session.info();
     }
@@ -235,14 +237,14 @@ class SessionController {
      */
     @PostMapping("/sessions/{id}/permissions")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    void answerPermission(@PathVariable String id, @RequestBody PermissionAnswer answer, Principal principal) {
+    void answerPermission(@PathVariable String id, @RequestBody PermissionAnswer answer, Caller caller) {
         if (answer.toolCallId() == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "toolCallId is required");
         }
         if (answer.optionId() == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "optionId is required");
         }
-        sessions.get(principal.getName(), id).answerPermission(principal.getName(), answer.toolCallId(), answer.optionId());
+        sessions.get(caller, id).answerPermission(caller.name(), answer.toolCallId(), answer.optionId());
     }
 
     /**
@@ -257,9 +259,9 @@ class SessionController {
      */
     @GetMapping("/sessions/{id}/events")
     void events(@PathVariable String id, @RequestParam(defaultValue = "0") long after,
-            @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId, Principal principal,
+            @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId, Caller caller,
             HttpServletResponse response) throws IOException {
-        AgentSession session = sessions.get(principal.getName(), id);
+        AgentSession session = sessions.get(caller, id);
         long from = after;
         if (lastEventId != null) {
             try {
@@ -276,7 +278,7 @@ class SessionController {
             write(out, ": connected\n\n");
             while (!subscription.isFinished()) {
                 UiEvent event = subscription.poll(KEEPALIVE);
-                if (!sessions.canUse(principal.getName(), session)) {
+                if (!sessions.canUse(caller, session)) {
                     // a reconnecting client then gets 404, like any session it may not see
                     return;
                 }

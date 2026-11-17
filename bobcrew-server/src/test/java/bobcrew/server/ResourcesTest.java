@@ -43,4 +43,16 @@ class ResourcesTest {
         assertThatThrownBy(() -> Resources.of(null, Double.NaN, docker(null, 0, null, 0)))
             .hasMessageContaining("CPUs");
     }
+
+    @Test
+    void theDefaultIsLoweredToTheUsersCap() {
+        assertThat(Resources.of(null, null, docker("8GB", 4, null, 0), new Caller.Limits(0, 2L << 30, 1.0)))
+            .isEqualTo(new Resources(2L << 30, 1.0));
+        assertThat(Resources.of("16GB", 8.0, docker("8GB", 4, "4GB", 2), new Caller.Limits(0, 16L << 30, 8.0)))
+            .as("the user's own caps replace the server's")
+            .isEqualTo(new Resources(16L << 30, 8.0));
+        assertThatThrownBy(() -> Resources.of("4GB", null, docker(null, 0, "8GB", 0),
+                new Caller.Limits(0, 2L << 30, null)))
+            .hasMessageContaining("at most 2048MB");
+    }
 }

@@ -1,5 +1,6 @@
 server:
-  # Loopback only: the UI has no login, so it must not be reachable from other machines
+  # Loopback only: whoever can reach the UI acts as its user (with their token, or their login), so it must not be
+  # reachable from other machines
   address: 127.0.0.1
   port: ${BOBCREW_UI_PORT:8642}
 
@@ -19,6 +20,13 @@ bobcrew:
     token: ${BOBCREW_TOKEN:}
     token-file: ${BOBCREW_TOKEN_FILE:}
     ca-file: ${BOBCREW_CA_FILE:}
+    # Logging in with an identity provider (Keycloak) instead of configured tokens: servers without a token of
+    # their own get the logged-in user's. The realm's issuer, exactly as in its tokens; the client the realm has for
+    # UIs; and PEM certificates to trust for its HTTPS instead of the JDK's (a private CA).
+    oidc:
+      issuer-uri: ${BOBCREW_UI_OIDC_ISSUER_URI:}
+      client-id: ${BOBCREW_UI_OIDC_CLIENT_ID:bobcrew-ui}
+      ca-file: ${BOBCREW_UI_OIDC_CA_FILE:}
     # Role manifests (*.md), one per role; read on every request
     roles-dir: ${user.home}/.bobcrew/roles
     # The values of the secrets that roles name: one JSON object, readable by its owner only (chmod 600)

@@ -70,6 +70,15 @@ button.danger { color: var(--bad); }
 #sidebar header { display: flex; align-items: baseline; justify-content: space-between; padding: 14px 16px 6px; }
 #sidebar h1 { font-size: 18px; margin: 0; }
 #me { color: var(--muted); font-size: 13px; }
+#sidebar header .who { display: flex; gap: 8px; align-items: baseline; }
+#logout { font-size: 13px; color: var(--muted); }
+#login-view { margin: auto; max-width: 32em; padding: 24px; text-align: center; }
+a.button {
+  display: inline-block; padding: 6px 14px; border-radius: 6px; text-decoration: none;
+  background: var(--accent); color: var(--accent-text);
+}
+body.logged-out #new-session, body.logged-out #show-roles, body.logged-out #sessions,
+body.logged-out main > :not(#login-view) { display: none !important; }
 
 #new-session { display: grid; gap: 6px; padding: 10px 16px 14px; border-bottom: 1px solid var(--border); }
 

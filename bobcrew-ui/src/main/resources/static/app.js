@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   user: '',             // who this UI is signed in as
+  loginNeeded: false,   // the UI logs its user in with an identity provider, and nobody is logged in
   servers: [],          // list of configured servers [{name, url}]
   roles: [],            // available roles [{id, name, description, image, secrets, repository, branch, capabilities, memory, cpus}]
   serverLimits: new Map(), // server name -> {capabilities, maxMemoryBytes, maxCpus} from its /me
@@ -47,13 +48,26 @@ async function call(method, path, body) {
 async function checked(response) {
   if (!response.ok) {
     let message = response.status + ' ' + response.statusText;
+    let login = null;
     try {
       const detail = await response.json();
       if (detail && (detail.error || detail.message)) message = detail.error || detail.message;
+      if (response.status === 401 && detail && detail.login) login = detail.login;
     } catch (e) { /* not JSON */ }
+    if (login) showLogin(message);
     throw new Error(message);
   }
   return response;
+}
+
+// The UI logs its user in with an identity provider, and nobody is (or no longer) logged in: offer the login
+// instead of the sessions. /login is this UI's own page, which sends the browser on to the provider.
+function showLogin(message) {
+  state.loginNeeded = true;
+  document.body.classList.add('logged-out');
+  $('login-message').textContent = message;
+  $('login-view').hidden = false;
+  $('logout').hidden = true;
 }
 
 async function api(method, path, body) {
@@ -62,6 +76,7 @@ async function api(method, path, body) {
 }
 
 function notify(message) {
+  if (state.loginNeeded) return; // the login view says what is wrong
   const notice = $('notice');
   notice.textContent = message + '  (click to dismiss)';
   notice.hidden = false;
@@ -849,14 +864,25 @@ $('show-roles').addEventListener('click', () => showRoles());
 $('hide-roles').addEventListener('click', () => hideRoles());
 
 (async function start() {
+  let login = { enabled: false, loggedIn: false };
+  try {
+    login = await api('GET', '/login');
+  } catch (e) { /* an older UI: no login */ }
+  if (login.enabled && !login.loggedIn) {
+    showLogin('Log in to use bob-crew.');
+    return;
+  }
+  $('logout').hidden = !login.enabled;
   await refreshServers();
   try {
     const me = await api('GET', '/me');
     state.user = me.user;
     $('me').textContent = me.user;
+    $('admin-badge').hidden = !me.admin;
   } catch (e) {
     notify(e.message);
   }
+  if (state.loginNeeded) return;
   refreshRoles();
   refreshServerLimits();
   await refreshSessions();

@@ -25,6 +25,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * <li>Requests that change something must carry the {@code X-BobCrew} header. A page from another
  * origin cannot add a custom header without a CORS preflight, which is never granted.</li>
  * </ul>
+ *
+ * <p>One exception: {@code GET /login/callback} may come from another site, since that is where the identity
+ * provider sends the browser after a login ({@link OidcLogin}). It only completes a login this UI started, and
+ * once ({@code state}); its {@code Host} is checked like any other request's.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -36,6 +40,8 @@ class LocalOnlyFilter extends OncePerRequestFilter {
 
     private static final Set<String> SAFE_METHODS = Set.of("GET", "HEAD");
 
+    static final String LOGIN_CALLBACK = "/login/callback";
+
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
@@ -44,13 +50,14 @@ class LocalOnlyFilter extends OncePerRequestFilter {
             refuse(response, "This UI only answers on the loopback interface");
             return;
         }
+        boolean callback = request.getMethod().equals("GET") && LOGIN_CALLBACK.equals(request.getRequestURI());
         String origin = request.getHeader("Origin");
-        if (origin != null && !origin.equalsIgnoreCase("http://" + host)) {
+        if (origin != null && !callback && !origin.equalsIgnoreCase("http://" + host)) {
             refuse(response, "Requests from other origins are not allowed");
             return;
         }
         String fetchSite = request.getHeader("Sec-Fetch-Site");
-        if (fetchSite != null && !fetchSite.equals("same-origin") && !fetchSite.equals("none")) {
+        if (fetchSite != null && !callback && !fetchSite.equals("same-origin") && !fetchSite.equals("none")) {
             refuse(response, "Requests from other sites are not allowed");
             return;
         }

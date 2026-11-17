@@ -4,14 +4,15 @@ A starting point for `~/.bobcrew/`, the configuration directory of the user who 
 
 ```
 ui.template/
-  ui.properties        -> ~/.bobcrew/ui.properties   server URL, token file, CA
+  ui.properties        -> ~/.bobcrew/ui.properties   server URL, token file or Keycloak login, CA
   secrets.json         -> ~/.bobcrew/secrets.json    the secrets roles pass to sessions (empty, mode 600)
   roles/developer.md   -> ~/.bobcrew/roles/developer.md
   roles/power-user.md  -> ~/.bobcrew/roles/power-user.md
 ```
 
 Copy it with `scripts/init-ui-config.sh`, which never overwrites a file that already exists, then edit
-`~/.bobcrew/ui.properties` and put the token and the server's `ca.crt` where it says.
+`~/.bobcrew/ui.properties` and put the token and the server's `ca.crt` where it says; or, where users log in
+with Keycloak, set `bobcrew.ui.oidc.issuer-uri` there instead of a token.
 
 ## The Developer role
 

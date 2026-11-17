@@ -10,7 +10,7 @@
 #   ca.key      keep private; only needed to sign more certificates
 #   server.crt  BOBCREW_TLS_CERT
 #   server.key  BOBCREW_TLS_KEY
-#   jwt.secret  BOBCREW_JWT_SECRET_FILE
+#   jwt.secret  BOBCREW_JWT_SECRET_FILE (not made with BOBCREW_JWT_SECRET=false, as for Keycloak's machine)
 set -euo pipefail
 
 out="${1:-certs}"
@@ -44,7 +44,7 @@ if [[ ! -f "$out/server.key" ]]; then
   echo "created $out/server.crt for $san"
 fi
 
-if [[ ! -f "$out/jwt.secret" ]]; then
+if [[ "${BOBCREW_JWT_SECRET:-true}" != false && ! -f "$out/jwt.secret" ]]; then
   openssl rand -base64 48 > "$out/jwt.secret"
   echo "created $out/jwt.secret"
 fi

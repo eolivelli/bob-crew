@@ -14,6 +14,10 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
 - `scripts/push-images.sh [-i key] user@host image... | --all` copies session images to the remote
   Docker over ssh (the server never pulls images). Build them first with `scripts/build-images.sh`.
 - `scripts/connect-ui.sh [-i key] user@host` runs the UI locally against it.
+- With Keycloak (users log in instead of being given tokens): `scripts/deploy-keycloak.sh [-i key] user@kc-host`
+  runs it in Docker (port 8543), `scripts/keycloak-user.sh [-i key] user@kc-host add <name> [--admin]
+  [--cap docker]` adds users, and `deploy-remote.sh` / `connect-ui.sh` take
+  `--keycloak https://<kc-host>:8543/realms/bobcrew --keycloak-ca ~/.bobcrew/keycloak-ca.crt`.
 
 ## 1. Find the target
 
@@ -26,7 +30,9 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
    needed on the machine: it is in the session images.
    If something is missing, follow `.lab/REMOTE_WORKER_SETUP.md` (it is a checklist; run the steps
    non-interactively; gh login and the API key are manual).
-3. Never print tokens, `BOB_API_KEY`, `jwt.secret` or `server.env`. Redact when showing config files.
+3. Never print tokens, `BOB_API_KEY`, `jwt.secret`, `server.env`, Keycloak's `admin.password` or
+   `keycloak.env`. Redact when showing config files. `keycloak-user.sh add` and `password` print a temporary
+   password once, for the user it is for: hand it over, do not repeat it elsewhere.
 
 ## 2. Build and deploy
 
@@ -59,11 +65,25 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
    `POST .../prompt`, read `.../events`, `GET .../metrics`, `DELETE` it. `docker ps --filter
    label=bobcrew.managed` on the remote shows the session's container while it is open.
 
+## 3b. Keycloak (when users should log in)
+
+1. Ask whether Keycloak runs already (then only `keycloak/bobcrew-realm.json` needs importing there) or
+   should run on one of the machines: `scripts/deploy-keycloak.sh -i <key> <user>@<public hostname>` (with
+   `BOBCREW_KEYCLOAK_BIND=<private ip>` on cloud VMs, as for the server). Port 8543 must be reachable from the
+   users' browsers, their UIs and every server: the same address for all of them.
+2. Add users: `scripts/keycloak-user.sh -i <key> <user>@<host> add <name> [--admin] [--cap docker]`. List
+   them with `list`.
+3. Deploy servers with `--keycloak <issuer> --keycloak-ca ~/.bobcrew/keycloak-ca.crt` (the issuer is
+   printed by deploy-keycloak.sh). Check: `curl --cacert ~/.bobcrew/keycloak-ca.crt
+   <issuer>/.well-known/openid-configuration` answers from here.
+
 ## 4. Connect the UI
 
 Tell the user to run (foreground, Ctrl-C stops it; open http://127.0.0.1:8642):
 
-`scripts/connect-ui.sh -i <key> <user>@<public hostname>`
+`scripts/connect-ui.sh -i <key> <user>@<public hostname>`, plus
+`--keycloak <issuer> --keycloak-ca ~/.bobcrew/keycloak-ca.crt` when users log in with Keycloak (then
+**Log in** on the page).
 
 To stop the remote server: `scripts/deploy-remote.sh -i <key> <user>@<host> --stop`.
 

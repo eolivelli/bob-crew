@@ -17,19 +17,20 @@ class ServerRegistry {
 
     ServerRegistry(UiProperties properties) {
         Map<String, ServerConnection> map = new LinkedHashMap<>();
+        boolean login = properties.oidc() != null && properties.oidc().enabled();
         if (properties.servers() != null && !properties.servers().isEmpty()) {
             for (Map.Entry<String, UiProperties.ServerConfig> entry : properties.servers().entrySet()) {
                 String key = entry.getKey();
                 UiProperties.ServerConfig config = entry.getValue();
                 String name = config.name() != null && !config.name().isBlank() ? config.name() : key;
                 ServerConnection connection = new ServerConnection(name, config.effectiveUrl(), config.token(),
-                        config.tokenFile(), config.caFile());
+                        config.tokenFile(), config.caFile(), login);
                 map.put(connection.name(), connection);
             }
         } else if (properties.serverUrl() != null && !properties.serverUrl().isBlank()) {
             // single server backward compatibility
             ServerConnection connection = new ServerConnection(null, properties.serverUrl(), properties.token(),
-                    properties.tokenFile(), properties.caFile());
+                    properties.tokenFile(), properties.caFile(), login);
             map.put(connection.name(), connection);
         }
         if (map.isEmpty()) {

@@ -2,7 +2,15 @@
 # Copies bobcrew-server to a remote machine over ssh and (re)starts it there with nohup, using the
 # wider settings of start-server-wide.sh (--auto-approve, --trust, MCP and subagents).
 #
-#   scripts/deploy-remote.sh [-i identity-file] user@host [--stop]
+#   scripts/deploy-remote.sh [-i identity-file] user@host [--keycloak issuer [--keycloak-ca file] | --no-keycloak]
+#   scripts/deploy-remote.sh [-i identity-file] user@host --stop
+#
+# With --keycloak, the server also accepts tokens from that Keycloak realm (scripts/deploy-keycloak.sh prints the
+# issuer, and leaves its CA in ~/.bobcrew/keycloak-ca.crt), so users log in instead of being given tokens; roles
+# in the realm decide who may use the server, who is an admin and who may ask for which capability. The CA (needed
+# when Keycloak's certificate is from a private CA) is copied to the machine. The setting is kept in
+# <remote dir>/oidc.env for later deployments; --no-keycloak removes it. Tokens from issue-token keep working.
+# The server must reach Keycloak at the issuer's address.
 #
 # The remote machine needs Java 21, openssl and Docker, and the remote user must be able to run
 # docker (docker group). Sessions run in containers from images that must already be on the remote
@@ -20,7 +28,7 @@
 # machine, never to a command line. Otherwise an existing server.env is kept.
 #
 # Files on the remote machine, under $BOBCREW_REMOTE_DIR (default ~/bobcrew): server.log,
-# server.pid, server.env, certs/ (CA, server certificate, JWT secret).
+# server.pid, server.env, oidc.env, certs/ (CA, server certificate, JWT secret, Keycloak's CA).
 #
 # The agents do not see the remote machine's environment: variables such as GH_TOKEN come from the
 # machine running the UI, as listed by the session's role.
@@ -31,15 +39,39 @@ here="$(cd "$(dirname "$0")" && pwd)"
 source "$here/remote-common.sh"
 
 usage() {
-  echo "usage: scripts/deploy-remote.sh [-i identity-file] user@host [--stop]" >&2
+  echo "usage: scripts/deploy-remote.sh [-i identity-file] user@host [--keycloak issuer [--keycloak-ca file] | --no-keycloak | --stop]" >&2
 }
 
-parse_target "$@"
+# the options with values, before parse_target
+args=()
+keycloak=""
+keycloak_ca=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --keycloak|--keycloak-ca)
+      [[ $# -ge 2 ]] || die "$1 needs a value"
+      if [[ "$1" == --keycloak ]]; then keycloak="$2"; else keycloak_ca="$2"; fi
+      shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+parse_target "${args[@]}"
 host="${TARGET#*@}"
 stop_only=false
+no_keycloak=false
 for word in "${EXTRA[@]}"; do
-  [[ "$word" == "--stop" ]] && stop_only=true || die "unknown option: $word"
+  case "$word" in
+    --stop) stop_only=true ;;
+    --no-keycloak) no_keycloak=true ;;
+    *) die "unknown option: $word" ;;
+  esac
 done
+if [[ -n "$keycloak" ]]; then
+  $no_keycloak && die "--keycloak and --no-keycloak together?"
+  check_keycloak "$keycloak" "$keycloak_ca"
+elif [[ -n "$keycloak_ca" ]]; then
+  die "--keycloak-ca goes with --keycloak"
+fi
 trap close_ssh EXIT
 
 # Stops the server named in server.pid, if it is running. Arguments: remote dir.
@@ -95,6 +127,21 @@ elif ! rssh "test -f '$REMOTE_DIR/server.env'"; then
        "Bob will answer 'Authentication required' unless it has another login" >&2
 fi
 
+if [[ -n "$keycloak" ]]; then
+  rssh "mkdir -p '$REMOTE_DIR/certs'"
+  ca_setting=""
+  if [[ -n "$keycloak_ca" ]]; then
+    rscp "$keycloak_ca" "$TARGET:$REMOTE_DIR/certs/keycloak-ca.crt"
+    ca_setting="certs/keycloak-ca.crt"
+  fi
+  printf 'BOBCREW_OIDC_ISSUER_URI=%q\nBOBCREW_OIDC_CA_FILE=%q\n' "$keycloak" "$ca_setting" \
+    | rssh "umask 077; cat > '$REMOTE_DIR/oidc.env'"
+  echo "the server trusts logins from $keycloak"
+elif $no_keycloak; then
+  rssh "rm -f '$REMOTE_DIR/oidc.env' '$REMOTE_DIR/certs/keycloak-ca.crt'"
+  echo "the server no longer trusts a Keycloak realm"
+fi
+
 bind="${BOBCREW_REMOTE_BIND:-$host}"
 [[ "$bind" =~ ^[A-Za-z0-9.-]+$ ]] || die "BOBCREW_REMOTE_BIND must be an IPv4 address or a host name"
 
@@ -123,6 +170,7 @@ fi
 scripts/gen-dev-certs.sh certs "$3"
 
 if [ -f server.env ]; then set -a; . ./server.env; set +a; fi
+if [ -f oidc.env ]; then set -a; . ./oidc.env; set +a; fi
 export SERVER_ADDRESS="$addr" BOBCREW_PORT="$2"
 nohup scripts/start-server-wide.sh > server.log 2>&1 < /dev/null &
 echo $! > server.pid
@@ -136,4 +184,8 @@ tail -n 20 server.log >&2
 exit 1
 EOF
 
-echo "done; next: scripts/connect-ui.sh${IDENTITY:+ -i $IDENTITY} $TARGET"
+if [[ -n "$keycloak" ]] || rssh "test -f '$REMOTE_DIR/oidc.env'"; then
+  echo "done; next: scripts/connect-ui.sh${IDENTITY:+ -i $IDENTITY} $TARGET --keycloak <issuer> [--keycloak-ca <file>]"
+else
+  echo "done; next: scripts/connect-ui.sh${IDENTITY:+ -i $IDENTITY} $TARGET"
+fi

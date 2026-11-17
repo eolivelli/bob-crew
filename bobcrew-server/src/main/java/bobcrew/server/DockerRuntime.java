@@ -225,6 +225,16 @@ class DockerRuntime implements Closeable {
         return settings.defaultImage();
     }
 
+    /** The Docker host's memory and CPUs, as its daemon reports them. */
+    record HostResources(long memoryBytes, int cpus) {
+    }
+
+    HostResources hostResources() {
+        com.github.dockerjava.api.model.Info info = client.infoCmd().exec();
+        return new HostResources(info.getMemTotal() == null ? 0 : info.getMemTotal(),
+                info.getNCPU() == null ? 0 : info.getNCPU());
+    }
+
     /**
      * Removes every container labelled as this server instance's: at startup they can only be left over
      * from an earlier run, whose sessions are gone.

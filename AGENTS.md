@@ -14,7 +14,11 @@ app serves the web UI and forwards API calls with the user's token.
 
 ```
 browser --http 127.0.0.1--> bobcrew-ui --HTTPS + Bearer JWT--> bobcrew-server --Docker attach--> container: bob acp
+   \--- log in ---> Keycloak <--- tokens, keys ---/
 ```
+
+Users log in with Keycloak (OpenID Connect; the realm is `keycloak/bobcrew-realm.json`), or are given HS256
+tokens made with `issue-token`; the server accepts both, each checked as its issuer requires.
 
 ## Build and test
 
@@ -39,8 +43,11 @@ before Spring starts), unless `BOBCREW_REQUIRE_DOCKER=true`, which CI (`.github/
 they fail instead. The only network use is building that image the first time (its base, and
 `microdnf install git-core`). The image holds a bare repository, `/opt/test-repos/sample.git` (branches
 `main` and `feature`), which the tests clone over `file://` (allowed only in tests, through
-`bobcrew.git.allowed-schemes`). Do not add a test that requires the real `bob` binary, the `bobcrew/bob-*`
-images, or other network access.
+`bobcrew.git.allowed-schemes`). The OpenID Connect tests (`OidcIntegrationTest`, `UiKeycloakIntegrationTest`) run a
+real Keycloak, `bobcrew-test-support`'s `TestKeycloak`: one container per test JVM with the shipped realm imported,
+users and a password-grant test client added through the admin API, skipped like the Docker tests
+(`KeycloakAvailable`). Pulling its pinned image the first time is the other network use. Do not add a test that
+requires the real `bob` binary, the `bobcrew/bob-*` images, or other network access.
 
 After changing `bobcrew-fake-agent`, run `mvn install -pl bobcrew-fake-agent` (or build with
 `-am`) before running server tests: they copy its `-all` jar from the local repository into the image.
@@ -55,6 +62,8 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `bobcrew-server/` | The service: Spring Boot 4 (Spring MVC, virtual threads), package `bobcrew.server` |
 | `bobcrew-ui/` | Loopback-only UI app, package `bobcrew.ui`; pages in `src/main/resources/static/` |
 | `bobcrew-fake-agent/` | `FakeAcpAgent`: scripted ACP agent, hand-written JSON-RPC, no SDK |
+| `bobcrew-test-support/` | Tests only: `TestKeycloak` (a real Keycloak in Docker, with the realm) and `KeycloakAvailable` (the JUnit condition) |
+| `keycloak/bobcrew-realm.json` | The Keycloak realm: roles, the public `bobcrew-ui` client (PKCE, port-less loopback callback), the audience and limit-attribute mappers, the user profile declaring those attributes. `RealmFileTest` keeps it in step with the code |
 | `docker/bob-base/` | The default session image (UBI 9, Bob Shell, git, gh, Node, Homebrew) and `bobcrew-entrypoint.sh`, the image/server contract |
 | `docker/bob-java/` | Example image built on bob-base (JDK 21, Maven, Gradle, Ant) |
 | `docker/bob-java-python/` | Development template image (JDK 21, Maven 3.9, Python 3.11); git/GitHub setup comes from bob-base's `profile.d/40-git.sh` |
@@ -62,12 +71,14 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `ui.template/` | Starting `~/.bobcrew/` for UI users (`ui.properties`, `roles/developer.md`, `roles/power-user.md`), copied by `scripts/init-ui-config.sh`; `RoleRegistryTest` checks the roles stay valid |
 | `scripts/gen-dev-certs.sh` | Private CA, server certificate and JWT secret for development |
 | `scripts/build-images.sh`, `scripts/push-images.sh` | Build the images; copy images to another machine's Docker over ssh, only the layers it lacks (`drop-layers.py` filters the `docker save` archive) |
+| `scripts/deploy-keycloak.sh`, `scripts/keycloak-user.sh` | Run Keycloak in Docker on a machine (production mode, HTTPS, dev-file database on a volume); manage its users with `kcadm.sh` inside the container (`keycloak-admin.sh`, the part that runs there) |
 
 ### Server classes
 
 | Class | Role |
 |---|---|
-| `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager`. |
+| `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager` with the request's `Caller`. |
+| `Caller`, `CallerFactory`, `CallerAuthentication`, `CallerArgumentResolver` | Who makes a request and what they may do: name, admin, allowed capabilities, limits. `CallerFactory` makes it from a checked token: from `issue-token`'s as before Keycloak, from Keycloak's by roles and limit claims (bounded by the server's settings and ceilings). |
 | `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limits (in all and per user), the image allowlist, idle cleanup, shutdown, and the checks on client-supplied environment variables and secrets. |
 | `AgentSession` | One agent container and its ACP session: start (with the repository clone), prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
 | `DockerRuntime` | The only class that talks to Docker: creates the sessions' network (inter-container traffic off) and containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
@@ -80,7 +91,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `UiEvent` | The event record clients receive, and the event type names. |
 | `ContainerPaths` | Turns a client-supplied file path into a path inside `/opt/workspace` of the container. The only place that does. |
 | `SessionAccessPolicy` | Who may use a session (owner, users it is shared with, admins) and who may close or re-share it (owner, admins). Decide access here and nowhere else. |
-| `SecurityConfig` | JWT validation (signature, expiry, issuer, audience, subject, revocation list). |
+| `SecurityConfig` | JWT validation, per issuer (`JwtIssuerAuthenticationManagerResolver`): `issue-token`'s HS256 (signature, expiry, issuer, audience, subject, revocation list) and Keycloak's (its keys, fetched on first use; expiry, issuer, audience, user name). Every endpoint needs the `CallerAuthentication.USE` authority; its absence answers 403 with a message. |
 | `Tokens`, `IssueTokenCommand` | Secret loading and the `issue-token` command line. |
 | `BobCrewProperties` | All `bobcrew.*` settings. Defaults live here and in `application.yml`; keep the two in step. |
 
@@ -88,9 +99,10 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 
 | Class | Role |
 |---|---|
-| `ProxyController` | Forwards `/api/**` to the server with the token; streams responses through, and upload request bodies too (other bodies are read whole, up to 1 MB). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`) and `repository` out; refuses `image`/`env`/`secrets`/`repository` sent by the browser. |
+| `ProxyController` | Forwards `/api/**` to the server with the server's token, or the user's login (`OidcLogin.currentToken()`; 401 `{"login": "/login"}` without one); streams responses through, and upload request bodies too (other bodies are read whole, up to 1 MB). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`) and `repository` out; refuses `image`/`env`/`secrets`/`repository` sent by the browser. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
-| `ServerConnection` | Server URL, token, and the HTTP client with the trusted CA. |
+| `ServerConnection` | Server URL, token (none when the login provides it), and the HTTP client with the trusted CA. |
+| `OidcLogin`, `LoginController` | The user's Keycloak login: authorization code with PKCE as a public client, `state` once and for 10 minutes, tokens in memory only, refreshed 30 s before expiry; `/login`, `/login/callback`, `/logout`, `/api/login`. |
 | `RoleRegistry`, `RolesController` | Roles (first prompt, `image`, `secrets` names (`env` is an alias), `repository` and `branch`): Markdown manifests in `~/.bobcrew/roles`, read on every request; `GET /api/roles[/{id}]` answered locally, read-only. UI only, the server knows nothing of roles. Ids must match a strict name pattern and are never joined into a path otherwise; symlinks are ignored. |
 | `SecretStore` | Where a role's secret values come from: `~/.bobcrew/secrets.json` (`bobcrew.ui.secrets-file`), one JSON object, refused unless mode 600, read for every new session, never quoted in errors. Never the UI process's environment. |
 | `static/app.js` | The front end: plain JavaScript, no build step, no dependencies. |
@@ -183,7 +195,15 @@ the maintainer.
   command line, and `AgentSession` drops the values once written. Images read them from there when needed
   (bob-base's `gh` wrapper and `git-credential-bobcrew`); do not export them in a `profile.d` snippet. The UI
   takes their values from `~/.bobcrew/secrets.json` only, never from its own environment.
-- The JWT secret and tokens are never logged. The UI's token must never be sent to the browser.
+- The JWT secret and tokens are never logged. The UI's tokens (configured, or the user's Keycloak access, refresh
+  and id tokens) must never be sent to the browser, and live in the UI's memory only.
+- A token's issuer picks how it is checked; never let a token of one issuer be checked with the other's key
+  (an HS256 token claiming Keycloak's issuer must be refused). Keycloak roles and attributes only narrow what
+  the server allows: a capability needs `bobcrew.allowed-capabilities` and the role; a user's limits stay under
+  the ceilings.
+- The Keycloak client for UIs is public: never give it a secret, the password grant or the implicit flow, and
+  keep PKCE required. Its callback is the loopback address without a port. The admin password of
+  `deploy-keycloak.sh` stays on Keycloak's machine and reaches `kcadm.sh` through the environment only.
 - Every path from a client goes through `ContainerPaths.resolve`. Do not build paths from request
   data anywhere else. File downloads serve regular files only, never what a symbolic link points to.
   Uploads are written by an exec running as the session's user, never through Docker's archive API
@@ -210,9 +230,10 @@ the maintainer.
   not leak. Anything long-lived (the event stream) checks access again as it goes.
 - The server has no cookies and no CORS headers. Adding either creates a CSRF surface that does
   not exist today.
-- The UI app binds to `127.0.0.1` and has no login; `LocalOnlyFilter` (Host, Origin,
+- The UI app binds to `127.0.0.1` and acts with its one user's token or login; `LocalOnlyFilter` (Host, Origin,
   `Sec-Fetch-Site`, the `X-BobCrew` header on changes) is what stops other web pages from using
-  it. New UI endpoints must stay behind it.
+  it. New UI endpoints must stay behind it. Its one exception, `GET /login/callback` from another site (Keycloak
+  sends the browser there), must only ever complete a login the UI started.
 - In `app.js`, text from the agent or from other users is inserted with `textContent` only. No
   `innerHTML`, no inline scripts or styles (the Content-Security-Policy forbids them).
 - `--auto-approve` is not in the default agent command, and the permission timeout rejects.

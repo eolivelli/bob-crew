@@ -14,14 +14,31 @@ public record UiProperties(
         String tokenFile,
         String caFile,
         String rolesDir,
-        String secretsFile) {
+        String secretsFile,
+        Oidc oidc) {
 
     @ConstructorBinding
     public UiProperties {
     }
 
     public UiProperties(String serverUrl, String token, String tokenFile, String caFile) {
-        this(null, serverUrl, token, tokenFile, caFile, null, null);
+        this(null, serverUrl, token, tokenFile, caFile, null, null, null);
+    }
+
+    /**
+     * Logging the user in with an OpenID Connect provider (Keycloak), for the servers that have no token of their
+     * own ({@link OidcLogin}).
+     *
+     * @param issuerUri the realm's issuer, such as {@code https://keycloak.example:8543/realms/bobcrew}; empty for
+     * no login
+     * @param clientId the realm's client for UIs ({@code bobcrew-ui} by default)
+     * @param caFile PEM certificates to trust for the provider's HTTPS instead of the JDK's (a private CA)
+     */
+    public record Oidc(String issuerUri, String clientId, String caFile) {
+
+        boolean enabled() {
+            return issuerUri != null && !issuerUri.isBlank();
+        }
     }
 
     public record ServerConfig(

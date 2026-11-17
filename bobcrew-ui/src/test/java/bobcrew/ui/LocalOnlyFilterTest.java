@@ -76,4 +76,29 @@ class LocalOnlyFilterTest {
         filter.doFilter(request, response, new MockFilterChain());
         return response.getStatus();
     }
+
+    @Test
+    void letsTheIdentityProviderSendTheBrowserBackToTheCallbackOnly() throws Exception {
+        MockHttpServletRequest callback = new MockHttpServletRequest("GET", LocalOnlyFilter.LOGIN_CALLBACK);
+        callback.addHeader("Host", "127.0.0.1:8642");
+        callback.addHeader("Sec-Fetch-Site", "cross-site");
+        assertThat(status(callback)).isEqualTo(200);
+
+        MockHttpServletRequest posted = new MockHttpServletRequest("POST", LocalOnlyFilter.LOGIN_CALLBACK);
+        posted.addHeader("Host", "127.0.0.1:8642");
+        posted.addHeader("Sec-Fetch-Site", "cross-site");
+        posted.addHeader("Origin", "https://keycloak.example");
+        assertThat(status(posted)).isEqualTo(403);
+
+        MockHttpServletRequest rebound = new MockHttpServletRequest("GET", LocalOnlyFilter.LOGIN_CALLBACK);
+        rebound.addHeader("Host", "evil.example:8642");
+        assertThat(status(rebound)).as("the host is still checked").isEqualTo(403);
+
+        for (String path : new String[] {"/login", "/logout", "/login/callback/x", "/api/me"}) {
+            MockHttpServletRequest other = new MockHttpServletRequest("GET", path);
+            other.addHeader("Host", "127.0.0.1:8642");
+            other.addHeader("Sec-Fetch-Site", "cross-site");
+            assertThat(status(other)).as(path).isEqualTo(403);
+        }
+    }
 }

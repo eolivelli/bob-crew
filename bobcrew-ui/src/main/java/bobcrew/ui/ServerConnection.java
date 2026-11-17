@@ -21,8 +21,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Where one bob-crew server is and how to reach it: its name, base URL, the token to present, and an
- * HTTP client that trusts the configured CA. Certificate and host name checks are always on.
+ * Where one bob-crew server is and how to reach it: its name, base URL, the token to present (configured, or
+ * none when the user logs in, {@link OidcLogin}), and an HTTP client that trusts the configured CA. Certificate and
+ * host name checks are always on.
  */
 class ServerConnection {
 
@@ -37,10 +38,11 @@ class ServerConnection {
     private final HttpClient client;
 
     ServerConnection(UiProperties properties) {
-        this(null, properties.serverUrl(), properties.token(), properties.tokenFile(), properties.caFile());
+        this(null, properties.serverUrl(), properties.token(), properties.tokenFile(), properties.caFile(), false);
     }
 
-    ServerConnection(String name, String url, String token, String tokenFile, String caFile) {
+    /** @param loginInstead whether a missing token is fine: the user's login provides one */
+    ServerConnection(String name, String url, String token, String tokenFile, String caFile, boolean loginInstead) {
         if (url == null || url.isBlank()) {
             throw new IllegalStateException("Server URL is not set for " + (name != null ? name : "server"));
         }
@@ -50,7 +52,7 @@ class ServerConnection {
         }
         this.baseUri = uri;
         this.name = name != null && !name.isBlank() ? name.strip() : uri.getHost();
-        this.token = readToken(token, tokenFile, this.name);
+        this.token = readToken(token, tokenFile, this.name, loginInstead);
         HttpClient.Builder builder = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(10))
@@ -70,6 +72,7 @@ class ServerConnection {
         return baseUri;
     }
 
+    /** The configured token, or null if the user's login provides it. */
     String token() {
         return token;
     }
@@ -78,7 +81,7 @@ class ServerConnection {
         return client;
     }
 
-    private static String readToken(String token, String tokenFile, String serverName) {
+    private static String readToken(String token, String tokenFile, String serverName, boolean loginInstead) {
         if ((token == null || token.isBlank()) && tokenFile != null && !tokenFile.isBlank()) {
             if (readableByOthers(Path.of(tokenFile))) {
                 // any other user of this machine could act as you on the server
@@ -92,7 +95,11 @@ class ServerConnection {
             }
         }
         if (token == null || token.isBlank()) {
-            throw new IllegalStateException("No API token for server " + serverName + ": set token or token-file");
+            if (loginInstead) {
+                return null;
+            }
+            throw new IllegalStateException("No API token for server " + serverName + ": set token or token-file, "
+                    + "or bobcrew.ui.oidc.issuer-uri for users to log in");
         }
         token = token.strip();
         if (token.chars().anyMatch(c -> c <= ' ' || c > '~')) {
@@ -113,7 +120,7 @@ class ServerConnection {
     }
 
     /** An SSL context that trusts exactly the certificates in the PEM file. */
-    private static SSLContext trusting(Path caFile) {
+    static SSLContext trusting(Path caFile) {
         try (InputStream in = Files.newInputStream(caFile)) {
             KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
             trustStore.load(null, null);
