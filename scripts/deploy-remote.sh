@@ -76,6 +76,14 @@ docker image inspect bobcrew/bob-base:latest >/dev/null 2>&1 \
 command -v java >/dev/null || { echo "error: java not found on the remote machine" >&2; exit 1; }
 v=$(java -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java.specification.version = \([0-9]*\).*/\1/p')
 [ "${v:-0}" -ge 21 ] || { echo "error: Java 21 or newer is needed on the remote machine (found ${v:-none})" >&2; exit 1; }
+
+# Allow container bridge forwarding in DOCKER-USER if a restrictive firewall (e.g. ctool) drops it
+if sudo -n iptables -S DOCKER-USER 2>/dev/null | grep -q -- "-j DROP"; then
+  if ! sudo -n iptables -S DOCKER-USER 2>/dev/null | grep -q -- "-i br-"; then
+    sudo -n iptables -I DOCKER-USER 1 -i br-+ -j RETURN 2>/dev/null || true
+    sudo -n iptables -I DOCKER-USER 1 -i docker0 -j RETURN 2>/dev/null || true
+  fi
+fi
 EOF
 
 # stop first: the new jar would otherwise replace the running one
@@ -86,10 +94,37 @@ rssh "mkdir -p '$REMOTE_DIR/bobcrew-server/target' '$REMOTE_DIR/scripts'"
 rscp "$jar" "$TARGET:$REMOTE_DIR/bobcrew-server/target/"
 rscp scripts/gen-dev-certs.sh scripts/start-server-wide.sh "$TARGET:$REMOTE_DIR/scripts/"
 
+remote_env_updates=""
 if [[ -n "${BOB_API_KEY:-}" ]]; then
-  # over stdin, so the key never shows up in a process list
-  printf 'BOB_API_KEY=%q\n' "$BOB_API_KEY" | rssh "umask 077; cat > '$REMOTE_DIR/server.env'"
-  echo "wrote BOB_API_KEY to $REMOTE_DIR/server.env"
+  remote_env_updates+="BOB_API_KEY=$BOB_API_KEY"$'\n'
+fi
+if [[ -n "${BOBCREW_ALLOWED_CAPABILITIES:-}" ]]; then
+  remote_env_updates+="BOBCREW_ALLOWED_CAPABILITIES=$BOBCREW_ALLOWED_CAPABILITIES"$'\n'
+fi
+
+if [[ -n "$remote_env_updates" ]]; then
+  # over stdin, so secrets never show up in a process list
+  printf '%s' "$remote_env_updates" | rssh bash -s -- "$REMOTE_DIR" <<'EOF'
+set -euo pipefail
+dir="$1"
+mkdir -p "$dir"
+touch "$dir/server.env"
+chmod 600 "$dir/server.env"
+while IFS= read -r line || [ -n "$line" ]; do
+  [[ -z "$line" || "$line" =~ ^# ]] && continue
+  key="${line%%=*}"
+  if grep -q "^${key}=" "$dir/server.env"; then
+    tmp=$(mktemp)
+    chmod 600 "$tmp"
+    grep -v "^${key}=" "$dir/server.env" > "$tmp" || true
+    echo "$line" >> "$tmp"
+    mv "$tmp" "$dir/server.env"
+  else
+    echo "$line" >> "$dir/server.env"
+  fi
+done
+EOF
+  echo "updated $REMOTE_DIR/server.env"
 elif ! rssh "test -f '$REMOTE_DIR/server.env'"; then
   echo "warning: BOB_API_KEY is not set here and the remote machine has no server.env;" \
        "Bob will answer 'Authentication required' unless it has another login" >&2
