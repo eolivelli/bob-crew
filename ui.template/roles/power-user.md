@@ -2,7 +2,7 @@
 name: Power User
 description: Developer who can also run Docker containers and Vagrant virtual machines (privileged session)
 image: bobcrew/bob-power:latest
-env: GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL
+secrets: GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL
 capabilities: docker, libvirt
 memory: 16GB
 cpus: 4

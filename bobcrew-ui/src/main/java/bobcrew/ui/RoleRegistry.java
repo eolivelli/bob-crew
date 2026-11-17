@@ -24,8 +24,11 @@ import org.springframework.stereotype.Component;
  * <ul>
  * <li>{@code name}, {@code description}: what the user sees;</li>
  * <li>{@code image}: the Docker image the session runs in (otherwise the server's default image);</li>
- * <li>{@code env}: names of environment variables, separated by commas or spaces, whose values this UI app
- * passes from its own environment to the session's container (never to the browser);</li>
+ * <li>{@code secrets}: names, separated by commas or spaces, of the secrets this UI app passes from
+ * {@code ~/.bobcrew/secrets.json} ({@link SecretStore}) to the session, where they become files in
+ * {@code /run/bobcrew/secrets} (never environment variables, and never sent to the browser). {@code env}, the
+ * key this used to be, still works as another name for it: the values come from the secrets file all the same,
+ * never from this app's environment;</li>
  * <li>{@code repository}, {@code branch}: an https git repository that the server clones (shallow, that branch
  * only, or the default branch when none is given) into the workspace before the agent starts; the first prompt
  * then tells the agent where it is;</li>
@@ -46,12 +49,12 @@ class RoleRegistry {
 
     /**
      * A role as shown to the user. {@code manifest} is the file as written, {@code prompt} its body; {@code image}
-     * is null when the role names none, {@code env} holds variable names only; {@code repository} and
+     * is null when the role names none, {@code secrets} holds names only; {@code repository} and
      * {@code branch} are null when not given; {@code capabilities} lists the capabilities asked for
      * (possibly none); {@code memory} and {@code cpus} are null when not given.
      */
     record Role(String id, String name, String description, String prompt, String manifest, String image,
-            List<String> env, String repository, String branch, List<String> capabilities, String memory,
+            List<String> secrets, String repository, String branch, List<String> capabilities, String memory,
             Double cpus) {
     }
 
@@ -72,8 +75,8 @@ class RoleRegistry {
     /** A branch name; the server checks it fully. */
     static final Pattern BRANCH = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._/+-]{0,199}");
 
-    /** An environment variable name. */
-    static final Pattern ENV_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]{0,127}");
+    /** A secret's name; it becomes a file name in the container, so the server allows no more. */
+    static final Pattern SECRET_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]{0,127}");
 
     static final String EXTENSION = ".md";
 
@@ -159,7 +162,7 @@ class RoleRegistry {
         List<String> capabilities = new ArrayList<>();
         String memory = null;
         Double cpus = null;
-        List<String> env = new ArrayList<>();
+        List<String> secrets = new ArrayList<>();
         String body = text;
 
         String[] lines = text.split("\n", -1);
@@ -232,17 +235,20 @@ class RoleRegistry {
                         } catch (NumberFormatException e) {
                             log.warn("Role {}: ignoring cpus, which must be a number such as 2 or 0.5", id);
                         }
-                    } else if (key.equals("env")) {
-                        for (String variable : value.split("[,\\s]+")) {
-                            if (variable.isEmpty()) {
+                    } else if (key.equals("secrets") || key.equals("env")) {
+                        if (key.equals("env")) {
+                            log.warn("Role {}: 'env' is now 'secrets'; its values come from the secrets file", id);
+                        }
+                        for (String secret : value.split("[,\\s]+")) {
+                            if (secret.isEmpty()) {
                                 continue;
                             }
-                            if (ENV_NAME.matcher(variable).matches()) {
-                                if (!env.contains(variable)) {
-                                    env.add(variable);
+                            if (SECRET_NAME.matcher(secret).matches()) {
+                                if (!secrets.contains(secret)) {
+                                    secrets.add(secret);
                                 }
                             } else {
-                                log.warn("Role {}: ignoring the invalid environment variable name {}", id, variable);
+                                log.warn("Role {}: ignoring the invalid secret name {}", id, secret);
                             }
                         }
                     }
@@ -260,7 +266,7 @@ class RoleRegistry {
             branch = null;
         }
         return new Role(id, name == null || name.isBlank() ? id : name, description, prompt, manifest, image,
-                List.copyOf(env), repository, branch, List.copyOf(capabilities), memory, cpus);
+                List.copyOf(secrets), repository, branch, List.copyOf(capabilities), memory, cpus);
     }
 
     private static String unquote(String value) {

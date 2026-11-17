@@ -16,6 +16,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.KeyStore;
 import java.time.Duration;
 import java.util.Base64;
@@ -30,9 +31,6 @@ import com.sun.net.httpserver.HttpsServer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Primary;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -51,14 +49,19 @@ class UiProxyTest {
 
     private static final Path rolesDir;
 
+    private static final Path secretsFile;
+
     static {
         try {
             Path directory = Files.createTempDirectory("bobcrew-ui-test");
             rolesDir = Files.createDirectory(directory.resolve("roles"));
+            secretsFile = directory.resolve("secrets.json");
+            Files.writeString(secretsFile, "{\"GH_TOKEN\": \"secret-gh-token\", \"UNUSED\": \"not-for-this-role\"}");
+            Files.setPosixFilePermissions(secretsFile, PosixFilePermissions.fromString("rw-------"));
             Files.writeString(rolesDir.resolve("qa-tester.md"),
                     "---\nname: QA Tester\ndescription: Finds defects\n---\nTest the app.\n");
             Files.writeString(rolesDir.resolve("builder.md"),
-                    "---\nname: Builder\nimage: bobcrew/bob-java:latest\nenv: GH_TOKEN, NOT_SET_HERE\n---\nBuild it.\n");
+                    "---\nname: Builder\nimage: bobcrew/bob-java:latest\nsecrets: GH_TOKEN, NOT_SET_HERE\n---\nBuild it.\n");
             Files.writeString(rolesDir.resolve("cloner.md"),
                     "---\nname: Cloner\nrepository: https://github.com/datastax/cassandra\nbranch: main\n---\nFix it.\n");
             Files.writeString(rolesDir.resolve("power.md"),
@@ -151,22 +154,7 @@ class UiProxyTest {
         registry.add("bobcrew.ui.token", () -> TOKEN);
         registry.add("bobcrew.ui.ca-file", caFile::toString);
         registry.add("bobcrew.ui.roles-dir", rolesDir::toString);
-    }
-
-    /** Stands in for the UI app's own environment. */
-    @TestConfiguration
-    static class FakeEnvironment {
-
-        @Bean
-        @Primary
-        HostEnvironment fakeHostEnvironment() {
-            return new HostEnvironment() {
-                @Override
-                String get(String name) {
-                    return name.equals("GH_TOKEN") ? "secret-gh-token" : null;
-                }
-            };
-        }
+        registry.add("bobcrew.ui.secrets-file", secretsFile::toString);
     }
 
     @LocalServerPort
@@ -257,12 +245,13 @@ class UiProxyTest {
     }
 
     @Test
-    void turnsARoleIntoTheImageAndEnvironmentOfANewSession() throws Exception {
+    void turnsARoleIntoTheImageAndSecretsOfANewSession() throws Exception {
         HttpResponse<String> created = post("/api/sessions", "{\"title\":\"t\",\"role\":\"builder\"}");
         assertThat(created.statusCode()).isEqualTo(200);
         assertThat(created.body()).contains("\"body\":{\"title\":\"t\",\"image\":\"bobcrew/bob-java:latest\","
-                + "\"env\":{\"GH_TOKEN\":\"secret-gh-token\"}}");
-        assertThat(created.headers().firstValue(ProxyController.MISSING_ENV_HEADER)).hasValue("NOT_SET_HERE");
+                + "\"secrets\":{\"GH_TOKEN\":\"secret-gh-token\"}}")
+            .as("only what the role names").doesNotContain("not-for-this-role");
+        assertThat(created.headers().firstValue(ProxyController.MISSING_SECRETS_HEADER)).hasValue("NOT_SET_HERE");
 
         // on a named server too
         HttpResponse<String> routed = post("/api/servers/localhost/sessions", "{\"role\":\"builder\"}");
@@ -300,6 +289,7 @@ class UiProxyTest {
     @Test
     void thePageCannotChooseTheImageOrEnvironmentItself() throws Exception {
         for (String body : new String[] {"{\"image\":\"evil/image\"}", "{\"env\":{\"X\":\"1\"}}",
+                "{\"secrets\":{\"X\":\"1\"}}", "{\"role\":\"builder\",\"secrets\":{}}",
                 "{\"role\":\"builder\",\"env\":{}}", "{\"repository\":{\"url\":\"https://evil.example/x\"}}",
                 "{\"role\":\"cloner\",\"repository\":null}"}) {
             HttpResponse<String> refused = post("/api/sessions", body);
@@ -312,8 +302,23 @@ class UiProxyTest {
         assertThat(post("/api/sessions", "[1]").statusCode()).isEqualTo(400);
         assertThat(post("/api/sessions", "not json").statusCode()).isEqualTo(400);
         // the role list shows names, never values
-        assertThat(get("/api/roles").body()).contains("\"env\":[\"GH_TOKEN\",\"NOT_SET_HERE\"]")
+        assertThat(get("/api/roles").body()).contains("\"secrets\":[\"GH_TOKEN\",\"NOT_SET_HERE\"]")
             .contains("\"image\":\"bobcrew/bob-java:latest\"").doesNotContain("secret-gh-token");
+    }
+
+    @Test
+    void refusesASecretsFileOthersCanRead() throws Exception {
+        Files.setPosixFilePermissions(secretsFile, PosixFilePermissions.fromString("rw-r--r--"));
+        try {
+            HttpResponse<String> refused = post("/api/sessions", "{\"role\":\"builder\"}");
+            assertThat(refused.statusCode()).isEqualTo(500);
+            assertThat(refused.body()).contains("chmod 600").doesNotContain("\"method\"")
+                .doesNotContain("secret-gh-token");
+            // a role without secrets does not need the file
+            assertThat(post("/api/sessions", "{\"role\":\"qa-tester\"}").statusCode()).isEqualTo(200);
+        } finally {
+            Files.setPosixFilePermissions(secretsFile, PosixFilePermissions.fromString("rw-------"));
+        }
     }
 
     @Test

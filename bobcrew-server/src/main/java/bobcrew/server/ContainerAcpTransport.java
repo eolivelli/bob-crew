@@ -57,6 +57,8 @@ final class ContainerAcpTransport implements AcpClientTransport {
 
     private final Consumer<String> onUnexpectedEnd;
 
+    private final Runnable afterStart;
+
     private final AcpJsonMapper jsonMapper = AcpJsonMapper.createDefault();
 
     private final Sinks.Many<JSONRPCMessage> inbound = Sinks.many().unicast().onBackpressureBuffer();
@@ -81,13 +83,16 @@ final class ContainerAcpTransport implements AcpClientTransport {
      * @param stderrHandler receives each line the agent writes to standard error
      * @param onUnexpectedEnd told, with the reason, when the container ends without the transport having been
      * closed; it runs on a Docker client thread
+     * @param afterStart run once the container has started and before any message is sent: the session's
+     * secrets are written then, while the entrypoint waits for them
      */
     ContainerAcpTransport(DockerRuntime docker, String containerId, Consumer<String> stderrHandler,
-            Consumer<String> onUnexpectedEnd) {
+            Consumer<String> onUnexpectedEnd, Runnable afterStart) {
         this.docker = docker;
         this.containerId = containerId;
         this.stderrHandler = stderrHandler;
         this.onUnexpectedEnd = onUnexpectedEnd;
+        this.afterStart = afterStart;
     }
 
     @Override
@@ -112,6 +117,7 @@ final class ContainerAcpTransport implements AcpClientTransport {
                 }
                 this.attachment = frames;
                 docker.start(containerId);
+                afterStart.run();
             });
         });
     }

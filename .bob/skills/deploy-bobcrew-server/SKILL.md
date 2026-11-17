@@ -73,6 +73,6 @@ To stop the remote server: `scripts/deploy-remote.sh -i <key> <user>@<host> --st
   and filter `pgrep`, or check `server.pid`.
 - The server does not survive a reboot or cluster TTL expiry; redeploy with this skill.
 - `POST /api/sessions` answers 400 when the image is not on the remote Docker: push it.
-- Agents do not see the remote machine's environment. Variables such as `GH_TOKEN` come from the
-  machine running the UI, listed in the role's `env:`.
+- Agents do not see the remote machine's environment. Secrets such as `GH_TOKEN` come from
+  `~/.bobcrew/secrets.json` on the machine running the UI, named in the role's `secrets:`.
 - Containers left by a server killed with -9 are removed when it starts again (label `bobcrew.instance`).

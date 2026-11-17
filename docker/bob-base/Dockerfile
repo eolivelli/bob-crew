@@ -50,7 +50,10 @@ RUN echo "installing Bob Shell ${BOB_VERSION:-latest} (refresh ${BOB_REFRESH})" 
 
 ENV PATH=/home/bob/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}
 
-# last, so that editing a snippet does not rebuild the layers above
+# last, so that editing a snippet does not rebuild the layers above. bin/ holds gh (a wrapper that hands
+# the session's GH_TOKEN secret to the real /usr/bin/gh) and git-credential-bobcrew (the same for git over
+# https://github.com): the token is read from its file when used, never kept in the environment.
+COPY --chmod=755 bin/ /usr/local/bin/
 COPY profile.d/ /etc/bobcrew/profile.d/
 
 WORKDIR /opt/workspace

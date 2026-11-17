@@ -8,7 +8,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   user: '',             // who this UI is signed in as
   servers: [],          // list of configured servers [{name, url}]
-  roles: [],            // available roles [{id, name, description, image, env, repository, branch, capabilities, memory, cpus}]
+  roles: [],            // available roles [{id, name, description, image, secrets, repository, branch, capabilities, memory, cpus}]
   serverLimits: new Map(), // server name -> {capabilities, maxMemoryBytes, maxCpus} from its /me
   metricsTimer: null,   // refreshes the metrics panel while it is open
   uploading: false,     // an upload is in progress
@@ -111,7 +111,7 @@ async function refreshRoles() {
     const option = el('option', '', role.name);
     option.value = role.id;
     option.title = [role.description, role.image ? 'image ' + role.image : '',
-      role.env && role.env.length ? 'env ' + role.env.join(', ') : '',
+      role.secrets && role.secrets.length ? 'secrets ' + role.secrets.join(', ') : '',
       role.repository ? 'clones ' + role.repository + (role.branch ? ' (' + role.branch + ')' : '') : '',
       role.capabilities && role.capabilities.length ? 'capabilities ' + role.capabilities.join(', ') : '',
       role.memory ? 'memory ' + role.memory : '', role.cpus ? role.cpus + ' CPUs' : '']
@@ -227,6 +227,7 @@ function showHeader(session) {
     `${session.agent || 'agent'}${serverInfo} · image ${session.image}`
     + (session.capabilities && session.capabilities.length ? ` · capabilities ${session.capabilities.join(', ')}` : '')
     + (session.resources ? ` · ${resourcesText(session.resources)}` : '')
+    + (session.secrets && session.secrets.length ? ` · secrets ${session.secrets.join(', ')}` : '')
     + (session.repository ? ` · repository ${session.repository.url}`
       + (session.repository.branch ? ` (${session.repository.branch})` : '') : '')
     + `${session.containerId ? ' · container ' + session.containerId : ''} · owner ${session.owner}`
@@ -502,7 +503,7 @@ $('new-session').addEventListener('submit', async (submit) => {
     // the server clones the role's repository before it answers, which can take a while
     button.textContent = role && role.repository ? 'Cloning the repository…' : 'Starting…';
     const createPath = server ? `/servers/${encodeURIComponent(server)}/sessions` : '/sessions';
-    // the UI app turns the role into the image and environment variables; their values never come here
+    // the UI app turns the role into the image and secrets; their values never come here
     const capabilities = CAPABILITIES.filter((name) => $(`cap-${name}`).checked && !$(`cap-${name}-label`).hidden);
     const memory = $('new-memory').value.replace(/\s+/g, '').toUpperCase();
     const cpus = $('new-cpus').value ? Number($('new-cpus').value) : null;
@@ -515,9 +516,9 @@ $('new-session').addEventListener('submit', async (submit) => {
     });
     const session = await response.json();
     if (server) session.server = server;
-    const missing = response.headers.get('X-BobCrew-Missing-Env');
+    const missing = response.headers.get('X-BobCrew-Missing-Secrets');
     if (missing) {
-      notify(`These environment variables of the role are not set where the UI runs, so the session has none: ${missing}`);
+      notify(`These secrets of the role are not in ~/.bobcrew/secrets.json, so the session has none: ${missing}`);
     }
     $('new-title').value = '';
     state.sessions.unshift(session);
@@ -828,7 +829,7 @@ async function showRole(id, item) {
     $('role-name').textContent = `${role.name} (${role.id})`;
     $('role-description').textContent = [role.description,
       `Image: ${role.image || "the server's default"}`,
-      `Environment passed from this computer: ${role.env && role.env.length ? role.env.join(', ') : 'none'}`,
+      `Secrets passed from this computer's secrets.json: ${role.secrets && role.secrets.length ? role.secrets.join(', ') : 'none'}`,
       ...(role.repository ? [`Repository cloned into the workspace: ${role.repository}`
         + (role.branch ? ` (branch ${role.branch})` : ' (default branch)')] : []),
       ...(role.capabilities && role.capabilities.length

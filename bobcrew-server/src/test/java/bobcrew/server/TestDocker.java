@@ -91,6 +91,8 @@ final class TestDocker implements ExecutionCondition {
         Files.copy(module.resolve("src/test/docker/fake-agent/Dockerfile"), context.resolve("Dockerfile"));
         Files.copy(module.resolveSibling("docker").resolve("bob-base/bobcrew-entrypoint.sh"),
                 context.resolve("bobcrew-entrypoint.sh"));
+        Files.copy(module.resolveSibling("docker").resolve("bob-base/bin/git-credential-bobcrew"),
+                context.resolve("git-credential-bobcrew"));
         Files.copy(fakeAgentJar(), context.resolve("fake-agent.jar"), StandardCopyOption.REPLACE_EXISTING);
         File dir = context.toFile();
         docker.buildImageCmd(dir)

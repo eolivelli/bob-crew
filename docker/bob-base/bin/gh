@@ -1,0 +1,14 @@
+#!/bin/sh
+# The GitHub CLI with the session's token: read from its secret file when gh runs and handed to that gh
+# process only, so that it is not in the agent's own environment. GH_TOKEN already set wins.
+if [ -z "${GH_TOKEN:-}" ]; then
+  dir="${BOBCREW_SECRETS_DIR:-/run/bobcrew/secrets}"
+  for name in GH_TOKEN GITHUB_TOKEN; do
+    if [ -r "${dir}/${name}" ]; then
+      GH_TOKEN="$(cat "${dir}/${name}")"
+      export GH_TOKEN
+      break
+    fi
+  done
+fi
+exec /usr/bin/gh "$@"

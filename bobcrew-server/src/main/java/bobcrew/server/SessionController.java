@@ -36,14 +36,18 @@ class SessionController {
 
     private static final Duration KEEPALIVE = Duration.ofSeconds(15);
 
-    /** {@code env} values are secrets as far as the server is concerned: never logged or returned. */
-    record CreateRequest(String title, String image, Map<String, String> env, RepositoryRequest repository,
-            List<String> capabilities, ResourcesRequest resources) {
+    /**
+     * {@code env} values and {@code secrets} values are never logged or returned. Secrets become files in the
+     * container rather than variables, so that they are not in every process's environment.
+     */
+    record CreateRequest(String title, String image, Map<String, String> env, Map<String, String> secrets,
+            RepositoryRequest repository, List<String> capabilities, ResourcesRequest resources) {
 
         @Override
         public String toString() {
             return "CreateRequest[title=" + title + ", image=" + image + ", env="
-                    + (env == null ? "{}" : env.keySet()) + ", repository=" + repository + ", capabilities=" + capabilities + ", resources=" + resources + "]";
+                    + (env == null ? "{}" : env.keySet()) + ", secrets=" + (secrets == null ? "{}" : secrets.keySet())
+                    + ", repository=" + repository + ", capabilities=" + capabilities + ", resources=" + resources + "]";
         }
     }
 
@@ -116,7 +120,7 @@ class SessionController {
                         properties.git().allowedSchemes());
         Resources resources = request.resources() == null ? Resources.of(null, null, properties.docker())
                 : Resources.of(request.resources().memory(), request.resources().cpus(), properties.docker());
-        return sessions.create(principal.getName(), title, request.image(), request.env(), repository,
+        return sessions.create(principal.getName(), title, request.image(), request.env(), request.secrets(), repository,
                 request.capabilities(), resources).info();
     }
 

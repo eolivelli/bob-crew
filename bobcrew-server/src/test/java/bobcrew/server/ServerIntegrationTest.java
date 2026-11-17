@@ -388,14 +388,35 @@ class ServerIntegrationTest {
     @Test
     void runsTheAgentInAnIsolatedContainer() throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("env", Map.of("TEST_MARKER", "marker-value", "GH_TOKEN", "a-token"));
+        body.put("env", Map.of("TEST_MARKER", "marker-value"));
+        body.put("secrets", Map.of("GH_TOKEN", "a-token"));
         JsonNode session = create(body);
         String id = session.get("id").asString();
-        assertThat(session.toString()).as("env values are not echoed").doesNotContain("marker-value");
+        assertThat(session.toString()).as("env and secret values are not echoed").doesNotContain("marker-value")
+            .doesNotContain("a-token");
+        assertThat(session.get("secrets").toString()).isEqualTo("[\"GH_TOKEN\"]");
 
         send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"whoami showenv TEST_MARKER\"}", alice);
-        String text = agentText(events(id, 0, event -> isStatus(event, "IDLE") && event.get("seq").asLong() > 1));
-        assertThat(text).contains("uid=1000", "cwd=/opt/workspace", "env TEST_MARKER=marker-value");
+        List<JsonNode> turn = events(id, 0, event -> isStatus(event, "IDLE") && event.get("seq").asLong() > 1);
+        String text = agentText(turn);
+        assertThat(text).contains("uid=1000", "cwd=/opt/workspace", "env TEST_MARKER=marker-value")
+            .as("the first prompt tells the agent where its secrets are")
+            .contains("as files in /run/bobcrew/secrets: GH_TOKEN.").doesNotContain("a-token");
+
+        // a secret is a file the session's user alone can read, not a variable
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"showenv GH_TOKEN\"}", alice);
+        assertThat(agentText(events(id, turn.size(), event -> isStatus(event, "IDLE"))))
+            .contains("env GH_TOKEN is unset");
+        String containerId = session.get("containerId").asString();
+        assertThat(execOutput(containerId, "cat", "/run/bobcrew/secrets/GH_TOKEN")).isEqualTo("a-token");
+        assertThat(execOutput(containerId, "stat", "-c", "%a %u %F", "/run/bobcrew/secrets/GH_TOKEN",
+                "/run/bobcrew/secrets"))
+            .isEqualTo("400 1000 regular file\n700 1000 directory\n");
+        assertThat(execOutput(containerId, "sh", "-c", "grep ' /run/bobcrew/secrets ' /proc/mounts"))
+            .startsWith("tmpfs /run/bobcrew/secrets tmpfs ");
+        assertThat(execOutput(containerId, "cat", "/proc/1/environ")).doesNotContain("a-token");
+        assertThat(execOutput(containerId, "git-credential-bobcrew", "get"))
+            .isEqualTo("username=x-access-token\npassword=a-token\n");
 
         InspectContainerResponse container = TestDocker.client()
             .inspectContainerCmd(session.get("containerId").asString()).exec();
@@ -421,7 +442,11 @@ class ServerIntegrationTest {
         List<String> extra = new ArrayList<>(List.of(container.getConfig().getEnv()));
         extra.removeAll(imageEnv);
         assertThat(extra.stream().map(entry -> entry.substring(0, entry.indexOf('='))))
-            .containsExactlyInAnyOrder("TEST_MARKER", "GH_TOKEN", "BOB_API_KEY", "BOBSHELL_API_KEY", "BOBCREW_SESSION_ID");
+            .containsExactlyInAnyOrder("TEST_MARKER", "BOB_API_KEY", "BOBSHELL_API_KEY", "BOBCREW_SESSION_ID",
+                    "BOBCREW_SECRETS_DIR");
+        assertThat(String.join(" ", container.getConfig().getEnv())).as("docker inspect shows no secret")
+            .doesNotContain("a-token");
+        assertThat(container.getHostConfig().getTmpFs()).containsKey(DockerRuntime.SECRETS_DIR);
     }
 
     @Test
@@ -469,6 +494,10 @@ class ServerIntegrationTest {
             assertThat(createStatus(Map.of("env", Map.of(name, "x")))).as(name).isEqualTo(400);
         }
         assertThat(createStatus(Map.of("env", Map.of("BIG", "x".repeat(40_000))))).isEqualTo(400);
+        for (String name : List.of("a/b", "..", ".ready", "1BAD", "")) {
+            assertThat(createStatus(Map.of("secrets", Map.of(name, "x")))).as(name).isEqualTo(400);
+        }
+        assertThat(createStatus(Map.of("secrets", Map.of("BIG", "x".repeat(40_000))))).isEqualTo(400);
         assertThat(JSON.readTree(send("GET", "/sessions", null, alice).body())).isEmpty();
         assertThat(TestDocker.client().listContainersCmd().withShowAll(true)
             .withLabelFilter(Map.of(DockerRuntime.LABEL_INSTANCE, instanceId)).exec())

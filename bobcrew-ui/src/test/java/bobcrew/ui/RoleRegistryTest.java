@@ -28,16 +28,22 @@ class RoleRegistryTest {
         assertThat(role.prompt()).isEqualTo("Test the app.\nReport bugs.");
         assertThat(role.manifest()).startsWith("---\nname: QA Tester");
         assertThat(role.image()).isNull();
-        assertThat(role.env()).isEmpty();
+        assertThat(role.secrets()).isEmpty();
     }
 
     @Test
-    void readsTheImageAndTheEnvironmentVariableNames() throws Exception {
+    void readsTheImageAndTheSecretNames() throws Exception {
         Files.writeString(directory.resolve("builder.md"), "---\nname: Builder\nimage: bobcrew/bob-java:latest\n"
-                + "env: GH_TOKEN, JIRA_TOKEN  MAVEN_OPTS,GH_TOKEN, bad-name, 9X\n---\nBuild it.\n");
+                + "secrets: GH_TOKEN, JIRA_TOKEN  MAVEN_OPTS,GH_TOKEN, bad-name, 9X, ../x\n---\nBuild it.\n");
         RoleRegistry.Role role = registry().get("builder").orElseThrow();
         assertThat(role.image()).isEqualTo("bobcrew/bob-java:latest");
-        assertThat(role.env()).containsExactly("GH_TOKEN", "JIRA_TOKEN", "MAVEN_OPTS");
+        assertThat(role.secrets()).containsExactly("GH_TOKEN", "JIRA_TOKEN", "MAVEN_OPTS");
+    }
+
+    @Test
+    void envIsStillReadAsSecrets() throws Exception {
+        Files.writeString(directory.resolve("old.md"), "---\nenv: GH_TOKEN\nsecrets: GIT_USER_NAME\n---\nGo.\n");
+        assertThat(registry().get("old").orElseThrow().secrets()).containsExactly("GH_TOKEN", "GIT_USER_NAME");
     }
 
     @Test
@@ -48,7 +54,7 @@ class RoleRegistryTest {
         assertThat(developer.name()).isEqualTo("Developer");
         assertThat(developer.image()).isEqualTo("bobcrew/bob-java-python:latest");
         // names the server accepts (it refuses BOB_*, BOBCREW_*, LD_*, PATH, HOME and the like)
-        assertThat(developer.env()).containsExactly("GH_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL");
+        assertThat(developer.secrets()).containsExactly("GH_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL");
         assertThat(developer.prompt()).contains("unit tests", "subagent", "PROJ-123:");
         assertThat(developer.capabilities()).isEmpty();
 

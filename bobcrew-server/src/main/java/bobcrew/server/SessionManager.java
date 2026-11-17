@@ -72,6 +72,8 @@ public class SessionManager {
      * @param image the image to run; null or blank for the server's default image
      * @param env environment variables for the container; nothing else from the client or the server's own
      * environment gets in (the server adds the API key)
+     * @param secrets written as files into the container's {@link DockerRuntime#SECRETS_DIR}, never into its
+     * environment; null or empty for none
      * @param repository cloned into the workspace before the agent's session starts, or null
      * @param capabilities what the agent may run besides commands ({@link Capabilities}); null or empty for none
      * @param resources the container's limits, already checked ({@link Resources#of})
@@ -79,16 +81,18 @@ public class SessionManager {
      * capability the server does not allow, 429 when the server or the user's share of it is full, 502 if the
      * agent fails
      */
-    AgentSession create(String owner, String title, String image, Map<String, String> env, GitRepository repository,
+    AgentSession create(String owner, String title, String image, Map<String, String> env, Map<String, String> secrets,
+            GitRepository repository,
             List<String> capabilities, Resources resources) {
         List<String> checkedCapabilities = Capabilities.check(capabilities, allowedCapabilities);
         String chosenImage = image == null || image.isBlank() ? docker.defaultImage() : image.strip();
         allowedImages.check(chosenImage);
         Map<String, String> checkedEnv = checkEnv(env);
+        Map<String, String> checkedSecrets = checkSecrets(secrets);
         String id = UUID.randomUUID().toString();
         AgentSession session = new AgentSession(new DockerRuntime.ContainerSpec(id, owner, chosenImage, checkedEnv,
                 checkedCapabilities, resources),
-                repository, title == null || title.isBlank() ? chosenImage : title.strip(), docker, properties);
+                repository, checkedSecrets, title == null || title.isBlank() ? chosenImage : title.strip(), docker, properties);
         synchronized (this) {
             if (stopping) {
                 throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "The server is shutting down");
@@ -113,8 +117,8 @@ public class SessionManager {
             sessions.remove(session.id());
             throw e;
         }
-        log.info("Session {} created by {} with image {}, environment {}{}", session.id(), owner, chosenImage,
-                checkedEnv.keySet(), (repository == null ? "" : ", repository " + repository.url())
+        log.info("Session {} created by {} with image {}, environment {}, secrets {}{}", session.id(), owner,
+                chosenImage, checkedEnv.keySet(), checkedSecrets.keySet(), (repository == null ? "" : ", repository " + repository.url())
                         + (checkedCapabilities.isEmpty() ? "" : ", capabilities " + checkedCapabilities
                                 + " (privileged)")
                         + ", memory " + (resources.memoryBytes() == null ? "unlimited" : resources.memoryBytes() + " bytes")
@@ -143,6 +147,31 @@ public class SessionManager {
             if (value == null || value.length() > limits.maxEnvValueLength() || value.indexOf('\0') >= 0) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "The value of the environment variable " + name
                         + " is missing, too long or invalid");
+            }
+            checked.put(name, value);
+        });
+        return checked;
+    }
+
+    /**
+     * Secrets become file names in the container, so their names follow the same rule as variable names (no
+     * separators, no dots); their values may be anything up to the same length as a variable's.
+     */
+    private Map<String, String> checkSecrets(Map<String, String> secrets) {
+        if (secrets == null || secrets.isEmpty()) {
+            return Map.of();
+        }
+        BobCrewProperties.Docker limits = properties.docker();
+        if (secrets.size() > limits.maxEnvVars()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Too many secrets (at most " + limits.maxEnvVars() + ")");
+        }
+        Map<String, String> checked = new LinkedHashMap<>();
+        secrets.forEach((name, value) -> {
+            if (name == null || !ENV_NAME.matcher(name).matches()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid secret name");
+            }
+            if (value == null || value.length() > limits.maxEnvValueLength()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "The secret " + name + " is missing or too long");
             }
             checked.put(name, value);
         });

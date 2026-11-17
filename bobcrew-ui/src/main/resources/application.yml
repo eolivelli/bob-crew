@@ -21,3 +21,5 @@ bobcrew:
     ca-file: ${BOBCREW_CA_FILE:}
     # Role manifests (*.md), one per role; read on every request
     roles-dir: ${user.home}/.bobcrew/roles
+    # The values of the secrets that roles name: one JSON object, readable by its owner only (chmod 600)
+    secrets-file: ${user.home}/.bobcrew/secrets.json

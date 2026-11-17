@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
@@ -32,10 +33,10 @@ import tools.jackson.databind.node.ObjectNode;
  * which is what keeps the Server-Sent Events of a session flowing.
  *
  * <p>Creating a session is the one request it rewrites: the browser names a {@code role}, and the request
- * forwarded carries that role's {@code image}, {@code env} (with the values of the environment variables
- * read here, from this app's environment) and {@code repository}. So the values never pass through the browser,
- * and the page cannot choose an image, set variables or have a repository cloned by itself: a request that tries
- * is refused.
+ * forwarded carries that role's {@code image}, {@code secrets} (with their values from the secrets file,
+ * {@link SecretStore}) and {@code repository}. So the values never pass through the browser, and the page cannot
+ * choose an image, pass secrets or variables, or have a repository cloned by itself: a request that tries is
+ * refused. Nothing comes from this app's own environment.
  *
  * <p>Request bodies are read whole (up to {@link #MAX_BODY}) before forwarding, except file uploads
  * ({@code PUT .../sessions/{id}/files}), which are streamed: the server enforces their size limit.
@@ -62,21 +63,21 @@ class ProxyController {
     private static final List<String> FORWARDED_RESPONSE_HEADERS = List.of("Cache-Control", "Content-Disposition",
             "X-Content-Type-Options");
 
-    /** Names the environment variables a role lists that are not set here; the page tells the user. */
-    static final String MISSING_ENV_HEADER = "X-BobCrew-Missing-Env";
+    /** Names the secrets a role lists that the secrets file does not have; the page tells the user. */
+    static final String MISSING_SECRETS_HEADER = "X-BobCrew-Missing-Secrets";
 
     private final ServerRegistry registry;
 
     private final RoleRegistry roles;
 
-    private final HostEnvironment environment;
+    private final SecretStore secrets;
 
     private final JsonMapper json = JsonMapper.builder().build();
 
-    ProxyController(ServerRegistry registry, RoleRegistry roles, HostEnvironment environment) {
+    ProxyController(ServerRegistry registry, RoleRegistry roles, SecretStore secrets) {
         this.registry = registry;
         this.roles = roles;
-        this.environment = environment;
+        this.secrets = secrets;
     }
 
     @GetMapping("/api/servers")
@@ -131,7 +132,7 @@ class ProxyController {
 
         boolean upload = request.getMethod().equals("PUT") && UPLOAD_PATH.matcher(forwardedPath).matches();
         boolean create = request.getMethod().equals("POST") && forwardedPath.equals("/api/sessions");
-        List<String> missingEnv = new ArrayList<>();
+        List<String> missingSecrets = new ArrayList<>();
         HttpRequest.BodyPublisher publisher;
         if (upload) {
             InputStream in = request.getInputStream();
@@ -145,7 +146,7 @@ class ProxyController {
                 return;
             }
             if (create) {
-                Optional<byte[]> expanded = expandRole(body, missingEnv, response);
+                Optional<byte[]> expanded = expandRole(body, missingSecrets, response);
                 if (expanded.isEmpty()) {
                     return;
                 }
@@ -187,8 +188,8 @@ class ProxyController {
                 return;
             }
             response.setStatus(upstream.statusCode());
-            if (!missingEnv.isEmpty()) {
-                response.setHeader(MISSING_ENV_HEADER, String.join(",", missingEnv));
+            if (!missingSecrets.isEmpty()) {
+                response.setHeader(MISSING_SECRETS_HEADER, String.join(",", missingSecrets));
             }
             upstream.headers().firstValue("Content-Type").ifPresent(response::setContentType);
             for (String name : FORWARDED_RESPONSE_HEADERS) {
@@ -215,11 +216,11 @@ class ProxyController {
 
     /**
      * Turns the browser's {@code {"title": ..., "role": ...}} into what the server takes:
-     * {@code {"title": ..., "image": ..., "env": {...}, "repository": {"url": ..., "branch": ...}}}. Variables the role lists but that are not set here are
-     * left out and added to {@code missingEnv} (names only).
+     * {@code {"title": ..., "image": ..., "secrets": {...}, "repository": {"url": ..., "branch": ...}}}. Secrets the
+     * role lists but the secrets file does not have are left out and added to {@code missingSecrets} (names only).
      * @return the body to forward, or empty if an error was sent instead
      */
-    private Optional<byte[]> expandRole(byte[] body, List<String> missingEnv, HttpServletResponse response)
+    private Optional<byte[]> expandRole(byte[] body, List<String> missingSecrets, HttpServletResponse response)
             throws IOException {
         ObjectNode request;
         try {
@@ -233,9 +234,9 @@ class ProxyController {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST, "The request is not valid JSON");
             return Optional.empty();
         }
-        if (request.has("image") || request.has("env") || request.has("repository")) {
+        if (request.has("image") || request.has("env") || request.has("secrets") || request.has("repository")) {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-                    "The image, environment and repository of a session come from its role");
+                    "The image, secrets and repository of a session come from its role");
             return Optional.empty();
         }
         // the page may ask for capabilities and resources itself; the server checks the values
@@ -263,17 +264,26 @@ class ProxyController {
             if (role.get().image() != null) {
                 request.put("image", role.get().image());
             }
-            ObjectNode env = json.createObjectNode();
-            for (String name : role.get().env()) {
-                String value = environment.get(name);
-                if (value == null) {
-                    missingEnv.add(name);
-                } else {
-                    env.put(name, value);
+            ObjectNode passed = json.createObjectNode();
+            if (!role.get().secrets().isEmpty()) {
+                Map<String, String> available;
+                try {
+                    available = secrets.load();
+                } catch (IllegalStateException e) {
+                    sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+                    return Optional.empty();
+                }
+                for (String name : role.get().secrets()) {
+                    String value = available.get(name);
+                    if (value == null) {
+                        missingSecrets.add(name);
+                    } else {
+                        passed.put(name, value);
+                    }
                 }
             }
-            if (!env.isEmpty()) {
-                request.set("env", env);
+            if (!passed.isEmpty()) {
+                request.set("secrets", passed);
             }
             if (role.get().repository() != null) {
                 ObjectNode repository = request.putObject("repository");
@@ -305,10 +315,10 @@ class ProxyController {
                 }
                 request.set("resources", merged);
             }
-            log.info("Creating a session with role {} (image {}, environment {}, not set here: {}, repository {}, "
+            log.info("Creating a session with role {} (image {}, secrets {}, not in the secrets file: {}, repository {}, "
                     + "capabilities {}, resources {})",
-                    role.get().id(), role.get().image() == null ? "default" : role.get().image(), env.propertyNames(),
-                    missingEnv, role.get().repository() == null ? "none" : role.get().repository(),
+                    role.get().id(), role.get().image() == null ? "default" : role.get().image(), passed.propertyNames(),
+                    missingSecrets, role.get().repository() == null ? "none" : role.get().repository(),
                     request.path("capabilities"), request.path("resources"));
         }
         return Optional.of(json.writeValueAsBytes(request));

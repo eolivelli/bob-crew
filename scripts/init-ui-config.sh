@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Prepares ~/.bobcrew/ for the bob-crew UI from ui.template/: ui.properties and the example roles.
+# Prepares ~/.bobcrew/ for the bob-crew UI from ui.template/: ui.properties, an empty secrets.json and the
+# example roles.
 # Files that already exist are left alone, so it is safe to run again (to pick up new roles, say).
 #
 #   scripts/init-ui-config.sh [target-dir]     (default: ~/.bobcrew)
@@ -22,6 +23,7 @@ copy() {
 }
 
 copy "$template/ui.properties" "$target/ui.properties" 600
+copy "$template/secrets.json" "$target/secrets.json" 600
 for role in "$template"/roles/*.md; do
   copy "$role" "$target/roles/$(basename "$role")" 644
 done
@@ -31,6 +33,8 @@ cat <<EOT
 Next:
   - edit $target/ui.properties (server URL), and put the token in $target/token (chmod 600)
     and the server's CA certificate in $target/ca.crt
-  - for the Developer role, export GIT_USER_NAME, GIT_USER_EMAIL and GH_TOKEN where the UI starts
+  - for the Developer role, put GIT_USER_NAME, GIT_USER_EMAIL and GH_TOKEN in $target/secrets.json,
+    for example {"GIT_USER_NAME": "Ada Lovelace", "GIT_USER_EMAIL": "ada@example.com", "GH_TOKEN": "..."}
+    (keep it chmod 600)
   - the role's image must be on the server: scripts/build-images.sh --only java-python
 EOT

@@ -9,6 +9,9 @@
 # So this script must:
 #   - write nothing to standard output (it carries ACP); diagnostics go to standard error;
 #   - make sure HOME and the workspace are usable by whatever uid the server chose;
+#   - wait for the session's secrets: the server writes them, one file each, into the tmpfs
+#     BOBCREW_SECRETS_DIR (/run/bobcrew/secrets) just after the container starts, and then .ready;
+#     profile.d snippets read them from there (they are never put into the environment);
 #   - source /etc/bobcrew/profile.d/*.sh, where images add PATH and tool settings
 #     (JAVA_HOME, Homebrew, ...), since no login shell runs;
 #   - exec the command, so the agent gets signals and its end ends the container.
@@ -49,6 +52,19 @@ if [ "$(id -u)" = "0" ]; then
   groups="--clear-groups"
   getent passwd "${agent_uid}" >/dev/null 2>&1 && groups="--init-groups"
   exec setpriv --reuid "${agent_uid}" --regid "${agent_gid}" "${groups}" -- "$0" "$@"
+fi
+
+if [ -n "${BOBCREW_SECRETS_DIR:-}" ]; then
+  waited=0
+  while [ ! -e "${BOBCREW_SECRETS_DIR}/.ready" ]; do
+    if [ "${waited}" -ge 600 ]; then
+      echo "bobcrew-entrypoint: the session's secrets did not arrive in ${BOBCREW_SECRETS_DIR} within a minute" >&2
+      exit 75
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  unset waited
 fi
 
 if [ -z "${HOME:-}" ] || [ ! -w "${HOME}" ]; then

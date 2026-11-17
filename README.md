@@ -82,10 +82,15 @@ Node.js 22 and Linux Homebrew. Its entrypoint, `bobcrew-entrypoint`, is the cont
 - in sessions with [capabilities](#capabilities-docker-and-virtual-machines) only, the container starts as
   root: `/etc/bobcrew/root.d/*.sh` run first, as root (to start daemons), then the entrypoint becomes the
   agent's user, and it refuses to run the agent as root;
-- git and GitHub are set up from environment variables a role can pass: `GIT_USER_NAME` and
-  `GIT_USER_EMAIL` become git's `user.name` and `user.email`, and `GH_TOKEN` (or `GITHUB_TOKEN`) is used
-  by the gh CLI and stored in git's credential store for `https://github.com` (in `$HOME`, mode 600,
-  never in the workspace).
+- the session's secrets are files in `$BOBCREW_SECRETS_DIR` (`/run/bobcrew/secrets`), a tmpfs owned by the
+  agent's user, mode 700, each file mode 400. The server writes them just after the container starts and then
+  `.ready`; the entrypoint waits for that (up to a minute) before sourcing `profile.d`, so snippets can read
+  them. They are never environment variables;
+- git and GitHub are set up from secrets a role can pass: `GIT_USER_NAME` and `GIT_USER_EMAIL` become git's
+  `user.name` and `user.email`; `GH_TOKEN` (or `GITHUB_TOKEN`) is read from its file when needed, by gh
+  through the wrapper `/usr/local/bin/gh` and by git over `https://github.com` through the credential helper
+  `git-credential-bobcrew`. It is never exported to the agent's environment nor copied to disk. (Variables
+  of those names passed through the API's `env` still work.)
 
 `bobcrew/bob-java-python` ([`docker/bob-java-python`](docker/bob-java-python/Dockerfile)) is the
 development template: JDK 21, Maven 3.9 and Python 3.11 (`python`, `python3` and `pip` are 3.11). It is
@@ -188,7 +193,7 @@ images. `deploy-remote.sh` starts the server with `scripts/start-server-wide.sh`
 ## Roles
 
 A role is a named kind of session ("QA Tester", "Java developer", ...): a first prompt, the Docker image
-to run, and the environment variables to give it. Roles exist only in the UI app: the server never sees
+to run, and the secrets to give it. Roles exist only in the UI app: the server never sees
 them. Each role is a Markdown manifest in `~/.bobcrew/roles/` (or the directory
 in `bobcrew.ui.roles-dir`), next to `ui.properties`. The file name without `.md` is the role's id
 (letters, digits, `.`, `_`, `-`; up to 100 characters).
@@ -198,7 +203,7 @@ in `bobcrew.ui.roles-dir`), next to `ui.properties`. The file name without `.md`
 name: QA Tester
 description: Exercises the application and reports defects
 image: bobcrew/bob-java:latest
-env: GH_TOKEN, JIRA_TOKEN
+secrets: GH_TOKEN, JIRA_TOKEN
 ---
 You are a QA tester. Clone the repository, run the application, try to break it, and report each
 defect with the steps to reproduce it.
@@ -212,11 +217,17 @@ patch before committing (which needs a server running Bob without `--disable-sub
 The front matter is optional. It understands `name` (default: the id), `description`, `image` (default:
 the server's `bobcrew.docker.default-image`), `repository` and `branch` (below), `capabilities`
 ([Capabilities](#capabilities-docker-and-virtual-machines)), `memory` and `cpus` ([Resources](#resources)),
-and `env`: names of
-environment variables, separated by commas or spaces. When a session is created with the role, the UI app reads those variables from **its
-own** environment (the laptop's, not the server's) and passes them to the session's container; the
-values never go through the browser, and a variable that is not set is left out (the page says which).
-The browser cannot choose an image or variables without a role. The rest of the file is the prompt. Files that are not `.md`, are symbolic links, are larger than 64 KiB, have an
+and `secrets`: names of
+secrets, separated by commas or spaces (`env`, the older name, still works the same way). When a session is
+created with the role, the UI app reads their values from `~/.bobcrew/secrets.json` (or
+`bobcrew.ui.secrets-file`) on the machine it runs on, a JSON object such as
+`{"GH_TOKEN": "github_pat_...", "JIRA_TOKEN": "..."}`, and passes them to the session, where each becomes a
+file in `/run/bobcrew/secrets` and the first prompt tells the agent which are there. Never the UI's own
+environment: a session gets what you put in that file for sessions, nothing that merely happens to be exported
+in your shell. The file must be readable by you only (`chmod 600`), or the UI refuses to create sessions whose
+role names secrets; it is read for every new session. The values never go through the browser, and a secret
+the file does not have is left out (the page says which). The browser cannot choose an image or secrets
+without a role. The rest of the file is the prompt. Files that are not `.md`, are symbolic links, are larger than 64 KiB, have an
 empty prompt, or come after the first 200 are ignored (a warning is logged). The directory is read on every
 request, so changes show up without restarting the UI.
 
@@ -226,7 +237,7 @@ A role can start every session with a repository checked out:
 ---
 name: Cassandra developer
 image: bobcrew/bob-java-python:latest
-env: GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL
+secrets: GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL
 repository: https://github.com/datastax/cassandra
 branch: main
 ---
@@ -236,7 +247,7 @@ branch: main
 When the session is created, the server clones the repository into the workspace, at
 `/opt/workspace/<name>` (`cassandra` here): a shallow clone (`--depth 1`) of that branch only, or of the
 default branch when `branch` is left out. It runs `git` in the container as the session's user, through
-the image's entrypoint, so with bob-base a `GH_TOKEN` among the role's variables also opens private
+the image's entrypoint, so with bob-base a `GH_TOKEN` among the role's secrets also opens private
 GitHub repositories. Session creation waits for the clone (up to `bobcrew.git.clone-timeout`, 10 minutes)
 and fails, leaving nothing behind, if git does. The first prompt then carries a short note telling the
 agent where the repository is and that it is shallow; the note is not shown as part of the user's text,
@@ -376,8 +387,9 @@ Notes on Bob:
   trust. `--auto-approve` is deliberately not on: tool calls ask for permission in the UI, and a
   request nobody answers within the permission timeout is rejected.
 - Without an API key Bob answers "Authentication required" and the session is not created.
-- The container's environment is the image's, plus the API key, `BOBCREW_SESSION_ID` and what the
-  session's role passes. Nothing comes from the server's own environment.
+- The container's environment is the image's, plus the API key, `BOBCREW_SESSION_ID`, `BOBCREW_SECRETS_DIR`
+  and the API's `env` (which the UI never sends). Secrets are files, not variables. Nothing comes from the
+  server's own environment.
 
 ## Security
 
@@ -413,8 +425,15 @@ Notes on Bob:
   user or one runaway session cannot take the machine from everyone else.
 - **Environment variables**: a client may set at most 32, with plain names; `BOB_API_KEY`,
   `BOBSHELL_API_KEY`, `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `HOSTNAME`, `BOBCREW_*` and `LD_*` are refused.
-  Their values are never logged or returned (only the names are logged). Anyone who can use a session
-  (its owner, the users it is shared with, admins) can ask its agent for them.
+  Their values are never logged or returned (only the names are logged). The UI does not use them.
+- **Secrets**: up to 32 (`[A-Za-z_][A-Za-z0-9_]*` names, values up to 32768 characters), written after the
+  container starts into the tmpfs `/run/bobcrew/secrets`, one file each, mode 400 and owned by the session's
+  user, through an exec's standard input (never a command line). They are not in the container's environment,
+  so they do not show in `docker inspect`, in `/proc/*/environ`, or in what the agent's tools inherit, and the
+  server forgets the values once written; they live in memory and go with the container. Only their names are
+  logged and returned (`secrets` in the session's details). This does not hide them from the agent, which can
+  read the files: anyone who can use a session (its owner, the users it is shared with, admins) can ask the
+  agent for them. The UI's values come from `~/.bobcrew/secrets.json`, never from its environment.
 - **File downloads**: the path must stay inside `/opt/workspace`, and only regular files are served, so
   a symbolic link cannot lead elsewhere in the container.
 - **File uploads**: the path must stay inside `/opt/workspace`; the file is written by the session's
@@ -438,8 +457,8 @@ All under `/api`, with `Authorization: Bearer <token>`.
 |---|---|
 | `GET /me` | The token's user (`user`), whether they are an admin (`admin`), the capabilities sessions may ask for (`capabilities`), and the caps on resources (`maxMemoryBytes`, `maxCpus`; null for none) |
 | `GET /sessions` | The sessions the caller may use: their own, those shared with them (all of them for an admin) |
-| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). 400 if the image is not on the server, a variable is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the server's cap; 403 for a capability the server does not allow |
-| `GET /sessions/{id}` | One session: `id`, `owner`, `sharedWith`, `title`, `image`, `containerId`, `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
+| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "secrets": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). `secrets` become files in `/run/bobcrew/secrets`, `env` environment variables. 400 if the image is not on the server, a variable or secret is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the server's cap; 403 for a capability the server does not allow |
+| `GET /sessions/{id}` | One session: `id`, `owner`, `sharedWith`, `title`, `image`, `containerId`, `secrets` (names), `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
 | `DELETE /sessions/{id}` | Closes it and removes its container. Owner or admin only (403 for users it is shared with) |
 | `PUT /sessions/{id}/sharing` `{"users": ["bob", "carol"]}` | Shares the session with exactly these users (`[]`: nobody else), and records a `shared` event. Owner or admin only (403 for users it is shared with); at most 50 names |
 | `GET /sessions/{id}/file?path=<path>` | Downloads a regular file from the session's workspace; `path` is relative to `/opt/workspace` or absolute inside it, `file://` allowed (403 if downloads are disabled) |
@@ -453,11 +472,12 @@ All under `/api`, with `Authorization: Bearer <token>`.
 | `GET /sessions/{id}/events?after=<seq>` | Server-Sent Events: the session's events after `seq`, then new ones |
 
 The UI app answers two more paths itself, without contacting a server: `GET /api/roles` (`[{"id", "name",
-"description", "image", "env", "repository", "branch", "capabilities", "memory", "cpus"}]`, `env` being names only) and `GET /api/roles/{id}` (adds
+"description", "image", "secrets", "repository", "branch", "capabilities", "memory", "cpus"}]`, `secrets` being names only) and `GET /api/roles/{id}` (adds
 `prompt` and the raw `manifest`; 404 if there is no such role). It also rewrites `POST /api/sessions`: the page
-sends `{"title", "role", "capabilities", "resources"}`, and the server receives the role's `image`, `env` and
-`repository`, the role's capabilities with any the page adds, and the page's resources or else the role's (header
-`X-BobCrew-Missing-Env` lists the variables that were not set). Uploads are streamed through it; other request
+sends `{"title", "role", "capabilities", "resources"}`, and the server receives the role's `image`, `secrets` (values from
+`~/.bobcrew/secrets.json`) and `repository`, the role's capabilities with any the page adds, and the page's resources or else the role's (header
+`X-BobCrew-Missing-Secrets` lists the secrets the file does not have; the page may not send `image`, `env`,
+`secrets` or `repository` itself). Uploads are streamed through it; other request
 bodies are limited to 1 MB.
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP

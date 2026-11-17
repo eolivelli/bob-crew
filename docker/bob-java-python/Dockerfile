@@ -1,6 +1,6 @@
 # Template image for Java and Python development: the bob-crew base plus JDK 21, Maven 3.9 and
 # Python 3.11 (python, python3 and pip point to 3.11). Git and GitHub are set up at start from the
-# variables GIT_USER_NAME, GIT_USER_EMAIL and GH_TOKEN (see bob-base/profile.d/40-git.sh).
+# secrets GIT_USER_NAME, GIT_USER_EMAIL and GH_TOKEN (see bob-base/profile.d/40-git.sh).
 #
 # Use it from a role with `image: bobcrew/bob-java-python:latest` (ui.template/roles/developer.md does).
 # Build with scripts/build-images.sh; copy it to a server with scripts/push-images.sh. Copy this

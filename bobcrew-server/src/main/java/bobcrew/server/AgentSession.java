@@ -48,7 +48,8 @@ final class AgentSession {
     }
 
     /** What clients see of a session. */
-    record Info(String id, String owner, List<String> sharedWith, String title, String image, String containerId, GitRepository repository,
+    record Info(String id, String owner, List<String> sharedWith, String title, String image, String containerId,
+            List<String> secrets, GitRepository repository,
             List<String> capabilities, Resources resources, Status status, String agent, String currentMode, List<Mode> modes, Instant createdAt, Instant updatedAt,
             long lastSeq) {
     }
@@ -112,14 +113,26 @@ final class AgentSession {
     /** Users other than the owner who may use the session; see {@link SessionAccessPolicy}. */
     private volatile Set<String> sharedWith = Set.of();
 
+    /** The names of the session's secrets (files in {@link DockerRuntime#SECRETS_DIR}); never their values. */
+    private final List<String> secretNames;
+
+    /** The secrets' values until they are written into the container, then null: the server keeps no copy. */
+    private volatile Map<String, String> pendingSecrets;
+
+    /** Why writing the secrets failed, if it did: reported as is rather than as a failure of the agent. */
+    private volatile ApiException secretsFailure;
+
     /** Whether the repository is in the workspace: cloned, and not wiped since. */
     private volatile boolean repositoryPresent;
 
     /**
      * @param repository cloned into the workspace when the session starts, or null
+     * @param secrets written as files into the container when it starts (names already checked); kept until then
      */
-    AgentSession(DockerRuntime.ContainerSpec spec, GitRepository repository, String title, DockerRuntime docker,
-            BobCrewProperties properties) {
+    AgentSession(DockerRuntime.ContainerSpec spec, GitRepository repository, Map<String, String> secrets, String title,
+            DockerRuntime docker, BobCrewProperties properties) {
+        this.secretNames = secrets.keySet().stream().sorted().toList();
+        this.pendingSecrets = Map.copyOf(secrets);
         this.id = spec.sessionId();
         this.owner = spec.owner();
         this.title = title;
@@ -170,7 +183,8 @@ final class AgentSession {
     }
 
     Info info() {
-        return new Info(id, owner, sharedWith.stream().sorted().toList(), title, spec.image(), DockerRuntime.shortId(containerId), repository, spec.capabilities(), spec.resources(),
+        return new Info(id, owner, sharedWith.stream().sorted().toList(), title, spec.image(),
+                DockerRuntime.shortId(containerId), secretNames, repository, spec.capabilities(), spec.resources(),
                 status,
                 agentName,
                 currentMode, modes, createdAt, updatedAt, events.lastSeq());
@@ -187,7 +201,8 @@ final class AgentSession {
             String created = docker.create(spec);
             this.containerId = created;
             ContainerAcpTransport transport = new ContainerAcpTransport(docker, created,
-                    line -> agentStderr.debug("[{}] {}", id, line), reason -> onAgentExit());
+                    line -> agentStderr.debug("[{}] {}", id, line), reason -> onAgentExit(),
+                    () -> writeSecrets(created));
             AcpSyncClient newClient = AcpClient.sync(transport)
                 .requestTimeout(properties.requestTimeout())
                 .promptTimeout(properties.promptTimeout())
@@ -220,6 +235,12 @@ final class AgentSession {
             shutdown();
             throw e;
         } catch (RuntimeException e) {
+            pendingSecrets = null;
+            if (secretsFailure != null) {
+                setStatus(Status.FAILED);
+                shutdown();
+                throw secretsFailure;
+            }
             log.warn("Session {}: the agent could not be started: {}", id, e.toString());
             setStatus(Status.FAILED);
             shutdown();
@@ -230,6 +251,18 @@ final class AgentSession {
             if (status == Status.STARTING) {
                 setStatus(Status.IDLE);
             }
+        }
+    }
+
+    /** Runs once the container has started; its entrypoint waits until this is done. */
+    private void writeSecrets(String container) {
+        Map<String, String> secrets = pendingSecrets;
+        pendingSecrets = null;
+        try {
+            docker.writeSecrets(container, secrets == null ? Map.of() : secrets, properties.requestTimeout());
+        } catch (ApiException e) {
+            secretsFailure = e;
+            throw e;
         }
     }
 
@@ -351,7 +384,17 @@ final class AgentSession {
         if (isFirst && repositoryPresent) {
             notes.append(repositoryNote()).append("\n\n");
         }
+        if (isFirst && !secretNames.isEmpty()) {
+            notes.append(secretsNote()).append("\n\n");
+        }
         return List.of(new AcpSchema.TextContent(notes + text));
+    }
+
+    String secretsNote() {
+        return "[Note: the user gave this session secrets, as files in " + DockerRuntime.SECRETS_DIR + ": "
+                + String.join(", ", secretNames) + ". Read one only where a command needs it (for example "
+                + "\"$(cat " + DockerRuntime.SECRETS_DIR + "/" + secretNames.get(0) + ")\"), and never print, log, "
+                + "commit or send its value anywhere else. git and gh already use GH_TOKEN when it is there.]";
     }
 
     String repositoryNote() {

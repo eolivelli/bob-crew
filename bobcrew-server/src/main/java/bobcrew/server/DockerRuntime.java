@@ -66,6 +66,18 @@ class DockerRuntime implements Closeable {
     /** The agent's working directory inside every container. */
     static final String WORKSPACE = "/opt/workspace";
 
+    /**
+     * Where a session's secrets are, one file per secret named after it: a tmpfs (memory, not a host directory)
+     * owned by the session's user, gone with the container. The entrypoint waits for {@link #SECRETS_READY} in it.
+     */
+    static final String SECRETS_DIR = "/run/bobcrew/secrets";
+
+    /** Written last into {@link #SECRETS_DIR}, so the entrypoint knows every secret is there. */
+    static final String SECRETS_READY = ".ready";
+
+    /** The session's user as {@code uid[:gid]}, numbers only: tmpfs ownership needs them. */
+    private static final Pattern NUMERIC_USER = Pattern.compile("([0-9]+)(?::([0-9]+))?");
+
     static final String LABEL_MANAGED = "bobcrew.managed";
 
     static final String LABEL_INSTANCE = "bobcrew.instance";
@@ -123,6 +135,8 @@ class DockerRuntime implements Closeable {
 
     private final BobCrewProperties.Agent agent;
 
+    private final String secretsMountOptions;
+
     DockerRuntime(BobCrewProperties properties) {
         this.settings = properties.docker();
         this.agent = properties.agent();
@@ -134,6 +148,12 @@ class DockerRuntime implements Closeable {
         if (uid.isEmpty() || uid.equals("0") || uid.equals("root")) {
             throw new IllegalStateException("bobcrew.docker.user must name a non-root user, as uid:gid");
         }
+        java.util.regex.Matcher numeric = NUMERIC_USER.matcher(user);
+        if (!numeric.matches()) {
+            throw new IllegalStateException("bobcrew.docker.user must be numeric, as uid:gid (such as 1000:1000)");
+        }
+        this.secretsMountOptions = "rw,nosuid,nodev,noexec,size=4m,mode=0700,uid=" + numeric.group(1) + ",gid="
+                + (numeric.group(2) != null ? numeric.group(2) : numeric.group(1));
         DockerClientConfig config = DefaultDockerClientConfig.createDefaultConfigBuilder()
             .withDockerHost(settings.host())
             .withApiVersion(settings.apiVersion())
@@ -243,6 +263,7 @@ class DockerRuntime implements Closeable {
             env.add("BOBSHELL_API_KEY=" + agent.apiKey());
         }
         env.add("BOBCREW_SESSION_ID=" + spec.sessionId());
+        env.add("BOBCREW_SECRETS_DIR=" + SECRETS_DIR);
         Map<String, String> labels = new LinkedHashMap<>();
         labels.put(LABEL_MANAGED, "true");
         labels.put(LABEL_INSTANCE, settings.instanceId());
@@ -251,7 +272,8 @@ class DockerRuntime implements Closeable {
         HostConfig host = HostConfig.newHostConfig()
             .withInit(true)
             .withNetworkMode(settings.network().strip())
-            .withAutoRemove(false);
+            .withAutoRemove(false)
+            .withTmpFs(Map.of(SECRETS_DIR, secretsMountOptions));
         if (spec.resources().memoryBytes() != null) {
             host.withMemory(spec.resources().memoryBytes());
         }
@@ -493,9 +515,45 @@ class DockerRuntime implements Closeable {
     }
 
     /**
+     * Writes the session's secrets into {@link #SECRETS_DIR} of the started container, one file per secret
+     * readable only by the session's user, then {@link #SECRETS_READY}, which the entrypoint waits for before it
+     * sets anything up or starts the agent. Each file goes through a temporary name, so a file is never seen
+     * half-written. The values reach the container on an exec's standard input, never on a command line.
+     * @param secrets names already checked (they are file names here), values as given
+     * @throws ApiException 500 if a file cannot be written; the values are never part of the message or the log
+     */
+    void writeSecrets(String containerId, Map<String, String> secrets, Duration timeout) {
+        String script = """
+                umask 077
+                head -c "$2" > "$1.tmp" || exit 5
+                [ "$(wc -c < "$1.tmp")" -eq "$2" ] || exit 6
+                chmod 400 "$1.tmp" && mv -f -- "$1.tmp" "$1" || exit 7
+                """;
+        for (Map.Entry<String, String> secret : secrets.entrySet()) {
+            byte[] value = secret.getValue().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            ExecResult result = exec(containerId, timeout, settings.user(), new java.io.ByteArrayInputStream(value),
+                    List.of(), List.of("sh", "-c", script, "bobcrew-secret", SECRETS_DIR + "/" + secret.getKey(),
+                            Integer.toString(value.length)));
+            if (result.exitCode() != 0) {
+                log.warn("Writing the secret {} in container {} exited with {}", secret.getKey(), shortId(containerId),
+                        result.exitCode());
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "The secret " + secret.getKey()
+                        + " could not be given to the session");
+            }
+        }
+        ExecResult ready = exec(containerId, timeout, settings.user(), null, List.of(),
+                List.of("touch", "--", SECRETS_DIR + "/" + SECRETS_READY));
+        if (ready.exitCode() != 0) {
+            log.warn("Marking the secrets of container {} ready exited with {}: {}", shortId(containerId),
+                    ready.exitCode(), ready.output().strip());
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "The session's secrets could not be set up");
+        }
+    }
+
+    /**
      * Clones a repository into the workspace, shallow and with one branch, as the session's user. The command
      * runs through the image's entrypoint, so the image's {@code profile.d} setup applies: with bob-base, a
-     * {@code GH_TOKEN} passed to the session gives access to private GitHub repositories.
+     * {@code GH_TOKEN} secret gives access to private GitHub repositories.
      * @throws ApiException 400 if git fails, with git's last line of output
      */
     void cloneRepository(String containerId, GitRepository repository, Duration timeout) {

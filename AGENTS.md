@@ -68,7 +68,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | Class | Role |
 |---|---|
 | `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager`. |
-| `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limits (in all and per user), the image allowlist, idle cleanup, shutdown, and the checks on client-supplied environment variables. |
+| `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limits (in all and per user), the image allowlist, idle cleanup, shutdown, and the checks on client-supplied environment variables and secrets. |
 | `AgentSession` | One agent container and its ACP session: start (with the repository clone), prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
 | `DockerRuntime` | The only class that talks to Docker: creates the sessions' network (inter-container traffic off) and containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
 | `AllowedImages` | Which images a client may name (`bobcrew.docker.allowed-images` globs, plus the default image). |
@@ -88,11 +88,11 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 
 | Class | Role |
 |---|---|
-| `ProxyController` | Forwards `/api/**` to the server with the token; streams responses through, and upload request bodies too (other bodies are read whole, up to 1 MB). Rewrites session creation: `role` in, the role's `image`, `env` (values read here) and `repository` out; refuses `image`/`env`/`repository` sent by the browser. |
+| `ProxyController` | Forwards `/api/**` to the server with the token; streams responses through, and upload request bodies too (other bodies are read whole, up to 1 MB). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`) and `repository` out; refuses `image`/`env`/`secrets`/`repository` sent by the browser. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
 | `ServerConnection` | Server URL, token, and the HTTP client with the trusted CA. |
-| `RoleRegistry`, `RolesController` | Roles (first prompt, `image`, `env` names, `repository` and `branch`): Markdown manifests in `~/.bobcrew/roles`, read on every request; `GET /api/roles[/{id}]` answered locally, read-only. UI only, the server knows nothing of roles. Ids must match a strict name pattern and are never joined into a path otherwise; symlinks are ignored. |
-| `HostEnvironment` | Where a role's environment variable values come from (the UI process's environment); a bean so tests can replace it. |
+| `RoleRegistry`, `RolesController` | Roles (first prompt, `image`, `secrets` names (`env` is an alias), `repository` and `branch`): Markdown manifests in `~/.bobcrew/roles`, read on every request; `GET /api/roles[/{id}]` answered locally, read-only. UI only, the server knows nothing of roles. Ids must match a strict name pattern and are never joined into a path otherwise; symlinks are ignored. |
+| `SecretStore` | Where a role's secret values come from: `~/.bobcrew/secrets.json` (`bobcrew.ui.secrets-file`), one JSON object, refused unless mode 600, read for every new session, never quoted in errors. Never the UI process's environment. |
 | `static/app.js` | The front end: plain JavaScript, no build step, no dependencies. |
 | `static/links.js` | Makes `https://` links in agent and user text clickable (https only, built as DOM elements, never HTML). Tested with `node bobcrew-ui/src/test/js/links.test.js` (Maven runs it too). |
 | `static/transcript-export.js` | Content-to-text helpers and the transcript export (events to a gzipped HTML page). Builds HTML as a string, so all text goes through `esc()`. Tested with `node bobcrew-ui/src/test/js/transcript-export.test.js` (Maven runs it too). |
@@ -101,7 +101,8 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 
 0. At creation, `AgentSession.start` has `DockerRuntime` create the container (not started), and
    builds the SDK client on a `ContainerAcpTransport`, whose `connect` attaches to the container and
-   only then starts it, so no output is lost.
+   only then starts it, so no output is lost, and then writes the session's secrets into the container (the
+   entrypoint waits for them).
 1. `POST /api/sessions/{id}/prompt` reaches `AgentSession.prompt`, which records a `user_prompt`
    event, sets status `RUNNING`, and returns. The HTTP call answers 202 at once.
 2. A virtual thread calls the SDK's blocking `client.prompt(...)`; the request is written as one line
@@ -132,6 +133,11 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
   detaching ends the agent's stdin and it exits. When the attach stream ends without a local close, the
   container died: the transport reports it (with the exit code) and `AgentSession.onAgentExit` marks the
   session `FAILED`.
+- **Secrets are written between start and the first message**: the entrypoint waits for
+  `/run/bobcrew/secrets/.ready` before it sources `profile.d` and runs the agent, and the tmpfs exists only once
+  the container runs, so `ContainerAcpTransport.connect` calls its `afterStart` hook (which writes them) right after
+  starting the container, before the SDK sends `initialize`. Writing them later, after `initialize`, would wait
+  forever for an agent that waits for them.
 - **The entrypoint keeps stdout clean**: anything an image prints to stdout before or besides the agent
   becomes an unreadable ACP line. `bobcrew-entrypoint.sh` sends all its output to stderr; images built
   on bob-base must do the same in their `profile.d` snippets.
@@ -170,7 +176,13 @@ the maintainer.
 
 - The Bob API key stays in server configuration and the container's environment. It must never appear
   in a DTO, an event, a log line, or `toString()`. The same goes for the values of the environment
-  variables clients pass (`ContainerSpec.toString()` and the logs show names only).
+  variables and secrets clients pass (`ContainerSpec.toString()`, `CreateRequest.toString()` and the logs
+  show names only).
+- Secrets are files, never environment variables: `DockerRuntime.writeSecrets` puts them in the tmpfs
+  `/run/bobcrew/secrets` (mode 700, files 400, the session's user) through an exec's standard input, never a
+  command line, and `AgentSession` drops the values once written. Images read them from there when needed
+  (bob-base's `gh` wrapper and `git-credential-bobcrew`); do not export them in a `profile.d` snippet. The UI
+  takes their values from `~/.bobcrew/secrets.json` only, never from its own environment.
 - The JWT secret and tokens are never logged. The UI's token must never be sent to the browser.
 - Every path from a client goes through `ContainerPaths.resolve`. Do not build paths from request
   data anywhere else. File downloads serve regular files only, never what a symbolic link points to.
@@ -190,7 +202,7 @@ the maintainer.
   this the default, never apply it to sessions that did not ask, and keep host mounts out of it too (image
   `VOLUME`s are anonymous and removed with the container).
 - Session creation from the browser goes through the UI's role expansion: the page never sees
-  environment variable values and cannot pick an image, variables or a repository itself. It may ask for
+  secret values and cannot pick an image, secrets, variables or a repository itself. It may ask for
   `capabilities` and `resources`; the server decides whether they are allowed.
 - A session is its owner's: other users see it only once it is shared with them, and only the owner or an admin
   closes or re-shares it. Every endpoint reaches a session through `SessionManager` with the caller's name, which
