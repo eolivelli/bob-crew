@@ -40,8 +40,9 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
    Build the images if they are missing locally (`docker image ls 'bobcrew/*'`):
    `scripts/build-images.sh`, then copy them: `scripts/push-images.sh -i <key> <user>@<host> --all`
    (it skips images the remote already has; the first copy is about 1 GB per image, compressed).
-2. `BOB_API_KEY` is taken from the local environment and written to the remote `server.env` (mode 600).
-   Check that it is set locally (`${BOB_API_KEY:+yes}`, without echoing it). If not, tell the user.
+2. The server does not need `BOB_API_KEY`: each user's own key is `BOB_API_KEY` in their `~/.bobcrew/secrets.json`,
+   which the UI passes when a session is created, so do not ask for it. If it is set locally, it is written to the
+   remote `server.env` (mode 600) as the fallback for sessions without a key of their own.
    An existing remote `server.env` is kept when it is not set. `BOBCREW_ALLOWED_CAPABILITIES` (for example
    `docker,libvirt`) is passed the same way when set locally; other lines of `server.env` are kept.
 3. The script makes the server listen on one address only, the host you give. Cloud VMs (EC2) have
