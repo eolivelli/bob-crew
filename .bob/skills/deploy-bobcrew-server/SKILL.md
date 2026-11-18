@@ -42,7 +42,8 @@ deploy ends up with a different layout (and listens on all interfaces), and `con
    (it skips images the remote already has; the first copy is about 1 GB per image, compressed).
 2. `BOB_API_KEY` is taken from the local environment and written to the remote `server.env` (mode 600).
    Check that it is set locally (`${BOB_API_KEY:+yes}`, without echoing it). If not, tell the user.
-   An existing remote `server.env` is kept when it is not set.
+   An existing remote `server.env` is kept when it is not set. `BOBCREW_ALLOWED_CAPABILITIES` (for example
+   `docker,libvirt`) is passed the same way when set locally; other lines of `server.env` are kept.
 3. The script makes the server listen on one address only, the host you give. Cloud VMs (EC2) have
    only their private address on the interface, so pass it:
    `BOBCREW_REMOTE_BIND=<private ip> scripts/deploy-remote.sh -i <key> <user>@<public hostname>`
@@ -96,3 +97,8 @@ To stop the remote server: `scripts/deploy-remote.sh -i <key> <user>@<host> --st
 - Agents do not see the remote machine's environment. Secrets such as `GH_TOKEN` come from
   `~/.bobcrew/secrets.json` on the machine running the UI, named in the role's `secrets:`.
 - Containers left by a server killed with -9 are removed when it starts again (label `bobcrew.instance`).
+- On machines whose firewall drops forwarded traffic in `DOCKER-USER`, the script adds `RETURN` rules for
+  Docker's bridges at the top of that chain (passwordless sudo needed; otherwise sessions cannot reach their
+  model API). Rules blocking sessions' traffic must be inserted above them.
+- User profile files (`~/.bobcrew/user-profile/` on the UI's machine) are copied into every session's
+  `/home/bob`; the UI refuses to create sessions if that directory is readable by others.

@@ -45,8 +45,8 @@ when the session starts.
 | `bobcrew-fake-agent` | A scripted ACP agent, for tests and for trying things without a Bob API key. |
 | `bobcrew-test-support` | For tests only: a real Keycloak in Docker with the project's realm. |
 | `keycloak/` | The Keycloak realm, `bobcrew-realm.json`: roles, the UI's client, the user attributes for limits. |
-| `docker/` | The session images: `bob-base` (the default), and `bob-java-python`, `bob-java` and `bob-power` (Docker and Vagrant/libvirt) built on it. |
-| `ui.template/` | A starting `~/.bobcrew/` for the UI: `ui.properties` and two example roles, Developer and Power User. |
+| `docker/` | The session images: `bob-base` (the default), and `bob-java-python`, `bob-java` and `bob-power` (Docker, Vagrant/libvirt and Ansible) built on it. |
+| `ui.template/` | A starting `~/.bobcrew/` for the UI: `ui.properties`, `secrets.json` and two example roles, Developer and Power User. |
 
 Sessions live in memory: restarting the server ends them and removes their containers.
 
@@ -54,8 +54,8 @@ Sessions live in memory: restarting the server ends them and removes their conta
 
 Needs Java 21, Maven and Node.js 18+ (for the UI's script tests). The server tests run the fake
 agent in real containers, so they need a Docker daemon; without one they are skipped. The first run
-pulls `eclipse-temurin:21-jre-ubi9-minimal` to build the test image. Neither Bob nor an API key is
-needed.
+pulls `eclipse-temurin:21-jre-ubi9-minimal` to build the test image, and Keycloak's image for the login
+tests, which run a real Keycloak with the project's realm. Neither Bob nor an API key is needed.
 
 ```
 mvn install
@@ -112,7 +112,7 @@ For a stack of your own, copy one of them: build on `bobcrew/bob-base`, put PATH
 a `profile.d` snippet, keep `USER bob` at the end, and name the image in a role.
 
 `bobcrew/bob-power` ([`docker/bob-power`](docker/bob-power/Dockerfile)) is bob-java-python plus Docker
-Engine (with compose and buildx) and Vagrant with the libvirt provider (QEMU/KVM), for
+Engine (with compose and buildx), Vagrant with the libvirt provider (QEMU/KVM) and Ansible (`ansible-core`), for
 sessions with the [docker and libvirt capabilities](#capabilities-docker-and-virtual-machines). QEMU and libvirt are not in UBI 9,
 so they come from CentOS Stream 9.
 
@@ -193,6 +193,15 @@ scripts/deploy-remote.sh [-i key] user@host --stop   # stop it
 The remote machine needs Java 21, openssl and Docker usable by that user; Bob itself lives in the
 images. `deploy-remote.sh` starts the server with `scripts/start-server-wide.sh`, which runs Bob with
 `--auto-approve`, MCP servers and subagents, and allows file downloads. Read its header before using it.
+
+The remote server's settings are in `~/bobcrew/server.env` (mode 600) on that machine. `BOB_API_KEY` and
+`BOBCREW_ALLOWED_CAPABILITIES`, when set where you run `deploy-remote.sh`, are written there (over ssh's standard
+input, never a command line), replacing earlier values of the same names and keeping the file's other lines; when
+unset, what the file has stays. When the remote's `DOCKER-USER` iptables chain drops traffic (a restrictive host
+firewall) and has no rule for Docker's bridges yet, and the remote user may run `sudo` without a password, the
+script inserts `-i br-+ -j RETURN` and `-i docker0 -j RETURN` at its top, so that sessions can reach the
+network. Those go before rules added to `DOCKER-USER` earlier, so insert rules that block sessions' traffic (see
+[Security](#security)) after deploying, with `-I`, so that they come first.
 
 | Script | Does |
 |---|---|
@@ -299,10 +308,6 @@ without a role. The rest of the file is the prompt. Files that are not `.md`, ar
 empty prompt, or come after the first 200 are ignored (a warning is logged). The directory is read on every
 request, so changes show up without restarting the UI.
 
-Files in `~/.bobcrew/user-profile/` (or `bobcrew.ui.user-profile-dir`) on the UI machine are automatically
-copied into the container user's home directory (`/home/bob/`) when a session is created (mode `0600`, or `0700`
-if executable). This allows passing custom dotfiles or tool configurations (such as `.m2/settings.xml` or `.gitconfig`).
-
 A role can start every session with a repository checked out:
 
 ```
@@ -333,6 +338,23 @@ A role can ask for [capabilities](#capabilities-docker-and-virtual-machines) (`c
 When creating a session, the **Role** list next to the title (shown when there are roles) can pick
 one: once the session exists, the UI sends the role's prompt to it as the first prompt, and a blank title becomes
 the role's name. The **Roles** button in the sidebar lists the roles and shows each manifest; it is read-only.
+
+## User profile files
+
+Files in `~/.bobcrew/user-profile/` (or `bobcrew.ui.user-profile-dir`) on the UI's machine are copied into the
+home directory of every new session's user, `/home/bob/`, keeping their relative paths: dotfiles and tool
+settings such as `.gitconfig`, `.m2/settings.xml` or scripts in `bin/`. They apply to every session that UI
+creates, with or without a role. The server writes them before the agent starts, as the session's user, mode
+600 (700 for files executable on your machine), replacing what the image has there.
+
+The directory is read for every new session, so changes apply to the next one. It must not be readable by
+other users of your machine (`chmod 700`; `scripts/init-ui-config.sh` creates it so), or the UI refuses to create
+sessions. Symbolic links and special files are skipped, at most 16 directories deep. Limits: 64 files, 256 KiB
+each, 1 MiB in all. Paths under `.bobcrew/` are refused.
+
+These are ordinary files, not [secrets](#roles): they stay on the container's disk, readable by the agent
+and by anyone who can use the session. A `settings.xml` with passwords in it is handed to whoever you share
+the session with.
 
 ## Exporting a session
 
@@ -535,6 +557,10 @@ Notes on Bob:
 - **Repositories**: `https://` only (the allowed schemes are a setting), no credentials, query or fragment in
   the URL, a plain branch name; both go to `git` as separate arguments after `--`, never through a shell.
   Like the image and variables, the page can only ask for a repository through a role.
+- **User profile files**: paths relative to `/home/bob`, checked by the server (no `..`, `.`, empty segments,
+  backslashes, colons or control characters; not under `.bobcrew/`; no file where another needs a directory),
+  and written by the session's user through an exec's standard input, each via a temporary file then
+  renamed. Only their paths are logged. The page cannot send them: the UI adds them from its own directory.
 - **The API key** stays in the server's configuration and the containers' environment. It is never part
   of a response or event.
 - **The UI app** acts with its user's token (configured, or from their Keycloak login), so it listens on
@@ -555,7 +581,7 @@ Keycloak user without the access role.
 |---|---|
 | `GET /me` | The token's user (`user`), whether they are an admin (`admin`), where the token is from (`issuer`: `oidc` or `token`), the capabilities their sessions may ask for (`capabilities`), how many sessions they may have open (`maxSessions`; 0 for no limit of their own) and their caps on resources (`maxMemoryBytes`, `maxCpus`; null for none) |
 | `GET /sessions` | The sessions the caller may use: their own, those shared with them (all of them for an admin) |
-| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "secrets": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). `secrets` become files in `/run/bobcrew/secrets`, `env` environment variables. 400 if the image is not on the server, a variable or secret is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the user's cap; 403 for a capability the user may not use |
+| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "secrets": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}, "userProfile": [{"path": ".gitconfig", "contentBase64": "...", "executable": false}]}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). `secrets` become files in `/run/bobcrew/secrets`, `env` environment variables, `userProfile` files under `/home/bob` ([User profile files](#user-profile-files)). 400 if the image is not on the server, a variable, secret or user profile file is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the user's cap; 403 for a capability the user may not use |
 | `GET /sessions/{id}` | One session: `id`, `owner`, `sharedWith`, `title`, `image`, `containerId`, `secrets` (names), `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
 | `DELETE /sessions/{id}` | Closes it and removes its container. Owner or admin only (403 for users it is shared with) |
 | `PUT /sessions/{id}/sharing` `{"users": ["bob", "carol"]}` | Shares the session with exactly these users (`[]`: nobody else), and records a `shared` event. Owner or admin only (403 for users it is shared with); at most 50 names |
@@ -571,13 +597,14 @@ Keycloak user without the access role.
 
 The UI app answers some paths itself, without contacting a server: `GET /api/login` (`{"enabled", "loggedIn"}`:
 whether it logs its user in with Keycloak, and whether someone is), `/login`, `/login/callback` and `/logout`
-(the login's redirects), and `GET /api/roles` (`[{"id", "name",
+(the login's redirects; the callback answers a page that moves on to `/` by itself, since a redirect from it
+would carry Keycloak's cross-site origin and be refused), and `GET /api/roles` (`[{"id", "name",
 "description", "image", "secrets", "repository", "branch", "capabilities", "memory", "cpus"}]`, `secrets` being names only) and `GET /api/roles/{id}` (adds
 `prompt` and the raw `manifest`; 404 if there is no such role). It also rewrites `POST /api/sessions`: the page
 sends `{"title", "role", "capabilities", "resources"}`, and the server receives the role's `image`, `secrets` (values from
 `~/.bobcrew/secrets.json`), `userProfile` (files from `~/.bobcrew/user-profile/`) and `repository`, the role's capabilities with any the page adds, and the page's resources or else the role's (header
 `X-BobCrew-Missing-Secrets` lists the secrets the file does not have; the page may not send `image`, `env`,
-`secrets` or `repository` itself). Uploads are streamed through it; other request
+`secrets`, `userProfile` or `repository` itself). Uploads are streamed through it; other request
 bodies are limited to 2 MB.
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP

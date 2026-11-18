@@ -67,7 +67,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `docker/bob-base/` | The default session image (UBI 9, Bob Shell, git, gh, Node, Homebrew) and `bobcrew-entrypoint.sh`, the image/server contract |
 | `docker/bob-java/` | Example image built on bob-base (JDK 21, Maven, Gradle, Ant) |
 | `docker/bob-java-python/` | Development template image (JDK 21, Maven 3.9, Python 3.11); git/GitHub setup comes from bob-base's `profile.d/40-git.sh` |
-| `docker/bob-power/` | bob-java-python plus Docker Engine and Vagrant/libvirt (QEMU from CentOS Stream 9), for sessions with the docker and libvirt capabilities; `root.d/` starts the daemons asked for |
+| `docker/bob-power/` | bob-java-python plus Docker Engine, Vagrant/libvirt (QEMU from CentOS Stream 9) and Ansible, for sessions with the docker and libvirt capabilities; `root.d/` starts the daemons asked for |
 | `ui.template/` | Starting `~/.bobcrew/` for UI users (`ui.properties`, `roles/developer.md`, `roles/power-user.md`), copied by `scripts/init-ui-config.sh`; `RoleRegistryTest` checks the roles stay valid |
 | `scripts/gen-dev-certs.sh` | Private CA, server certificate and JWT secret for development |
 | `scripts/build-images.sh`, `scripts/push-images.sh` | Build the images; copy images to another machine's Docker over ssh, only the layers it lacks (`drop-layers.py` filters the `docker save` archive) |
@@ -79,9 +79,9 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 |---|---|
 | `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager` with the request's `Caller`. |
 | `Caller`, `CallerFactory`, `CallerAuthentication`, `CallerArgumentResolver` | Who makes a request and what they may do: name, admin, allowed capabilities, limits. `CallerFactory` makes it from a checked token: from `issue-token`'s as before Keycloak, from Keycloak's by roles and limit claims (bounded by the server's settings and ceilings). |
-| `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limits (in all and per user), the image allowlist, idle cleanup, shutdown, and the checks on client-supplied environment variables and secrets. |
-| `AgentSession` | One agent container and its ACP session: start (with the repository clone), prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
-| `DockerRuntime` | The only class that talks to Docker: creates the sessions' network (inter-container traffic off) and containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, removes; removes this instance's leftover containers at startup and shutdown. |
+| `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limits (in all and per user), the image allowlist, idle cleanup, shutdown, and the checks on client-supplied environment variables, secrets and user profile files (`checkUserProfile`). |
+| `AgentSession` | One agent container and its ACP session: start (with the repository clone, then user profile files and secrets written before the agent runs), prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
+| `DockerRuntime` | The only class that talks to Docker: creates the sessions' network (inter-container traffic off) and containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, writes user profile files and secrets, removes; removes this instance's leftover containers at startup and shutdown. |
 | `AllowedImages` | Which images a client may name (`bobcrew.docker.allowed-images` globs, plus the default image). |
 | `Capabilities`, `Resources` | What a session may run besides commands (`docker`, `libvirt`), checked against `bobcrew.allowed-capabilities`; and its memory and CPU limits, checked against the server's caps. |
 | `GitRepository` | A repository to clone into a new session: checks the URL (allowed schemes, no credentials) and branch, and names the clone's directory. |
@@ -114,8 +114,8 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 
 0. At creation, `AgentSession.start` has `DockerRuntime` create the container (not started), and
    builds the SDK client on a `ContainerAcpTransport`, whose `connect` attaches to the container and
-   only then starts it, so no output is lost, and then writes the session's secrets into the container (the
-   entrypoint waits for them).
+   only then starts it, so no output is lost, and then writes the session's user profile files and secrets into
+   the container (the entrypoint waits for them).
 1. `POST /api/sessions/{id}/prompt` reaches `AgentSession.prompt`, which records a `user_prompt`
    event, sets status `RUNNING`, and returns. The HTTP call answers 202 at once.
 2. A virtual thread calls the SDK's blocking `client.prompt(...)`; the request is written as one line
@@ -206,7 +206,10 @@ the maintainer.
   keep PKCE required. Its callback is the loopback address without a port. The admin password of
   `deploy-keycloak.sh` stays on Keycloak's machine and reaches `kcadm.sh` through the environment only.
 - Every path from a client goes through `ContainerPaths.resolve`. Do not build paths from request
-  data anywhere else. File downloads serve regular files only, never what a symbolic link points to.
+  data anywhere else. The one exception is user profile files, relative to `/home/bob`, which
+  `SessionManager.checkUserProfile` checks (no `..`, `.`, empty segments, `\`, `:` or control characters, nothing
+  under `.bobcrew/`); their contents, like secrets', are never logged (`ProfileFile.toString()` shows the path).
+  File downloads serve regular files only, never what a symbolic link points to.
   Uploads are written by an exec running as the session's user, never through Docker's archive API
   (which writes as root and follows links anywhere in the container).
 - Repository URLs and branches go through `GitRepository.of`, and reach `git` as separate arguments after
@@ -223,7 +226,7 @@ the maintainer.
   this the default, never apply it to sessions that did not ask, and keep host mounts out of it too (image
   `VOLUME`s are anonymous and removed with the container).
 - Session creation from the browser goes through the UI's role expansion: the page never sees
-  secret values and cannot pick an image, secrets, variables or a repository itself. It may ask for
+  secret values and cannot pick an image, secrets, variables, user profile files or a repository itself. It may ask for
   `capabilities` and `resources`; the server decides whether they are allowed.
 - A session is its owner's: other users see it only once it is shared with them, and only the owner or an admin
   closes or re-shares it. Every endpoint reaches a session through `SessionManager` with the caller's name, which

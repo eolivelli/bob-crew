@@ -24,8 +24,14 @@
 # certificate is issued for the host name or IP you give, signed by a private CA that
 # scripts/connect-ui.sh fetches and trusts.
 #
-# If BOB_API_KEY is set here, it is written to <remote dir>/server.env (mode 600) on the remote
-# machine, never to a command line. Otherwise an existing server.env is kept.
+# BOB_API_KEY and BOBCREW_ALLOWED_CAPABILITIES, when set here, are written to <remote dir>/server.env (mode 600)
+# on the remote machine, over ssh's standard input, never a command line; they replace earlier values of the same
+# names, and the file's other lines are kept. Unset, what the file has stays.
+#
+# If the remote's DOCKER-USER iptables chain drops traffic and has no rule for Docker's bridges, and the remote
+# user may sudo without a password, RETURN rules for br-+ and docker0 are inserted at its top so that sessions
+# can reach the network. Rules that block sessions' traffic (cloud metadata, private ranges) must be inserted
+# above them, after deploying.
 #
 # Files on the remote machine, under $BOBCREW_REMOTE_DIR (default ~/bobcrew): server.log,
 # server.pid, server.env, oidc.env, certs/ (CA, server certificate, JWT secret, Keycloak's CA).

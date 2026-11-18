@@ -6,7 +6,7 @@ A starting point for `~/.bobcrew/`, the configuration directory of the user who 
 ui.template/
   ui.properties        -> ~/.bobcrew/ui.properties   server URL, token file or Keycloak login, CA
   secrets.json         -> ~/.bobcrew/secrets.json    the secrets roles pass to sessions (empty, mode 600)
-  user-profile/        -> ~/.bobcrew/user-profile/   files synced to /home/bob/ in session containers
+  (none)               -> ~/.bobcrew/user-profile/   files copied to /home/bob/ in sessions (created empty, mode 700)
   roles/developer.md   -> ~/.bobcrew/roles/developer.md
   roles/power-user.md  -> ~/.bobcrew/roles/power-user.md
 ```
@@ -43,10 +43,6 @@ is left out, and the page says so. Nothing comes from the UI's own environment. 
 session (you, the users you share it with, admins) can ask its agent for these values, so use tokens with
 the narrowest scope that does the job.
 
-## User profile (`~/.bobcrew/user-profile/`)
-
-Any regular files placed inside `~/.bobcrew/user-profile/` (such as `.m2/settings.xml`, `.gitconfig`, or custom scripts in `bin/`) are automatically copied into `/home/bob/` in the session container before the agent starts (mode 600 for files, mode 700 for executables).
-
 Its prompt asks the agent to work per ticket, on a branch, with unit tests for every change, a full
 build before committing, a **review of each patch by a subagent** before committing, the ticket id in
 every commit message, and pushes or pull requests only after you confirm.
@@ -62,6 +58,14 @@ repository checked out, add `repository: https://github.com/<owner>/<repo>` and 
 to the front matter: the server clones it (shallow) into `/opt/workspace/<repo>` before the agent starts, and
 tells the agent so in the first prompt. With a `GH_TOKEN` secret, private GitHub repositories work too. See "Roles" in the main
 README for the manifest format.
+
+## User profile (`~/.bobcrew/user-profile/`)
+
+Regular files in `~/.bobcrew/user-profile/` (such as `.m2/settings.xml`, `.gitconfig`, or scripts in `bin/`) are
+copied into `/home/bob/` in every new session before the agent starts, keeping their paths (mode 600, or 700 for
+executables). The directory must stay readable by you only (`chmod 700`; the UI refuses to create sessions
+otherwise). At most 64 files, 256 KiB each, 1 MiB in all. They are not secrets: they stay on the container's
+disk, and anyone who can use the session can read them. See "User profile files" in the main README.
 
 ## The Power User role
 
