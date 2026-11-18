@@ -27,8 +27,9 @@ bobcrew:
   max-sessions-per-user: ${BOBCREW_MAX_SESSIONS_PER_USER:4}
   # How long initialize, session/new and other short requests may take
   request-timeout: 30s
-  # How long one prompt turn may take
-  prompt-timeout: 10m
+  # How long one prompt turn may take before the agent is asked to stop (0: no limit, the turn lasts until it
+  # ends or a user stops it; an agent's turn can rightly take hours)
+  prompt-timeout: ${BOBCREW_PROMPT_TIMEOUT:0}
   # How long a permission request waits for an answer before it is rejected
   permission-timeout: 2m
   # Sessions with no activity for this long are closed; 0 disables the check

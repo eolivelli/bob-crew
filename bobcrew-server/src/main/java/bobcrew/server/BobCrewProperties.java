@@ -13,7 +13,7 @@ public record BobCrewProperties(
         @DefaultValue("8") int maxSessions,
         @DefaultValue("4") int maxSessionsPerUser,
         @DefaultValue("30s") Duration requestTimeout,
-        @DefaultValue("10m") Duration promptTimeout,
+        @DefaultValue("0") Duration promptTimeout,
         @DefaultValue("2m") Duration permissionTimeout,
         @DefaultValue("12h") Duration idleTimeout,
         @DefaultValue("5000") int eventBufferSize,

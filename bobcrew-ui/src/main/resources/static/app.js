@@ -413,7 +413,11 @@ function render(event) {
       setStatus(data.status);
       break;
     case 'error':
+      // the server has given up on the turn, if there was one; the agent may not have, and what it sends from
+      // here on must make Stop usable again
       state.streaming = null;
+      state.inTurn = false;
+      updateCancel();
       addMessage(linked('div', 'msg error', data.message || 'Error'));
       break;
     case 'file_uploaded':

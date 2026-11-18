@@ -180,6 +180,11 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 - **SSE is written from the request thread** in a blocking loop (`SessionController.events`), not
   with `SseEmitter`. This relies on virtual threads being enabled. `EventLog.close()` must wake
   waiting readers, otherwise shutdown waits for the keepalive interval.
+- **A turn has no time limit by default** (`bobcrew.prompt-timeout` is 0): an agent's turn can rightly take hours.
+  When a limit is set and passes, the SDK fails the prompt and sends `$/cancel_request`, which Bob does not act on,
+  so `AgentSession.onPromptTimeout` sends `session/cancel` as well; otherwise the session would say idle while the
+  agent goes on. In `app.js` an `error` event ends the turn for the page too, so that work the agent still does
+  makes Stop usable (`state.workAfterTurn`).
 - **Event sequence numbers** are contiguous per session and clients resume by them. Never mutate
   or reorder events after `append` (the one exception is `EventLog.discard()`, used by clearing a
   session, which drops all kept events and goes on numbering); add new event types rather than changing the shape of

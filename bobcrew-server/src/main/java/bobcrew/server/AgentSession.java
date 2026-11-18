@@ -412,8 +412,12 @@ final class AgentSession {
                 // the connection to the agent is gone, so the session is too
                 onAgentExit();
             } catch (RuntimeException e) {
-                log.warn("Session {}: prompt failed: {}", id, e.toString());
-                events.append(UiEvent.ERROR, null, Map.of("message", "The prompt failed: " + rootMessage(e)));
+                if (timedOut(e)) {
+                    onPromptTimeout();
+                } else {
+                    log.warn("Session {}: prompt failed: {}", id, e.toString());
+                    events.append(UiEvent.ERROR, null, Map.of("message", "The prompt failed: " + rootMessage(e)));
+                }
             } finally {
                 cancelPendingPermissions();
                 synchronized (this) {
@@ -423,6 +427,34 @@ final class AgentSession {
                 }
             }
         });
+    }
+
+    /**
+     * The turn outlasted {@code bobcrew.prompt-timeout}. The SDK has given up on the prompt and told the agent with
+     * {@code $/cancel_request}, which agents such as Bob do not act on: the agent would go on working in a session
+     * that says it is idle. So it is asked to stop the way ACP defines for a turn, {@code session/cancel}, and the
+     * event says what happened in the user's terms.
+     */
+    private void onPromptTimeout() {
+        Duration limit = properties.promptTimeout();
+        log.warn("Session {}: the turn took longer than {}; asking the agent to stop", id, limit);
+        events.append(UiEvent.ERROR, null, Map.of("message", "The turn took longer than this server allows ("
+                + limit.toString().substring(2).toLowerCase() + ", bobcrew.prompt-timeout), so the agent was asked "
+                + "to stop. Use Stop if it goes on working."));
+        try {
+            client.cancel(new AcpSchema.CancelNotification(acpSessionId));
+        } catch (RuntimeException e) {
+            log.warn("Session {}: the agent did not take the cancellation: {}", id, e.toString());
+        }
+    }
+
+    private static boolean timedOut(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause() == cause ? null : cause.getCause()) {
+            if (cause instanceof TimeoutException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

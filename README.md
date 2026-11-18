@@ -520,7 +520,8 @@ Set as environment variables, or as the Spring properties in
 | `BOBCREW_PIDS_LIMIT` | `4096` | Most processes per container (`0`: no limit) |
 
 Further properties: `bobcrew.max-sessions` (8), `bobcrew.request-timeout` (30s),
-`bobcrew.prompt-timeout` (10m), `bobcrew.permission-timeout` (2m), `bobcrew.idle-timeout` (12h),
+`bobcrew.prompt-timeout` (`BOBCREW_PROMPT_TIMEOUT`; none by default: a turn lasts until it ends or someone
+stops it; when set and passed, the agent is asked to stop and the session says so), `bobcrew.permission-timeout` (2m), `bobcrew.idle-timeout` (12h),
 `bobcrew.event-buffer-size` (5000), and per container `bobcrew.docker.user` (`1000:1000`, never root),
 `bobcrew.docker.stop-timeout` (5s), `bobcrew.docker.max-env-vars`
 (32), `bobcrew.docker.max-env-value-length` (32768); for repositories, `bobcrew.git.clone-timeout` (10m) and
