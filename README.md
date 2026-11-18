@@ -103,6 +103,10 @@ Node.js 22 and Linux Homebrew. Its entrypoint, `bobcrew-entrypoint`, is the cont
   through the wrapper `/usr/local/bin/gh` and by git over `https://github.com` through the credential helper
   `git-credential-bobcrew`. It is never exported to the agent's environment nor copied to disk. (Variables
   of those names passed through the API's `env` still work.)
+- Bob Shell's limit of 100 agentic turns per task is switched off (`session.maxTurns` is `0` in
+  `~/.bob/settings/settings.json`, by `profile.d/30-bob-settings.sh`), so that long jobs are not stopped
+  halfway. A `settings.json` among the [user profile files](#user-profile-files) that sets `session.maxTurns`
+  keeps its value.
 
 `bobcrew/bob-java-python` ([`docker/bob-java-python`](docker/bob-java-python/Dockerfile)) is the
 development template: JDK 21, Maven 3.9 and Python 3.11 (`python`, `python3` and `pip` are 3.11). It is
