@@ -19,7 +19,7 @@ public record BobCrewProperties(
         @DefaultValue("5000") int eventBufferSize,
         @DefaultValue("false") boolean fileDownloadsEnabled,
         @DefaultValue("true") boolean fileUploadsEnabled,
-        @DefaultValue("100MB") DataSize maxUploadSize,
+        @DefaultValue("200MB") DataSize maxUploadSize,
         @DefaultValue Agent agent,
         @DefaultValue Docker docker,
         @DefaultValue Git git,

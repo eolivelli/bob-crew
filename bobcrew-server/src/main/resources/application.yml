@@ -40,7 +40,7 @@ bobcrew:
   # Whether clients may upload files into a session's workspace, and how large one may be. Uploads are
   # written by the session's (non-root) user, so they can only go where the agent itself can write.
   file-uploads-enabled: ${BOBCREW_FILE_UPLOADS_ENABLED:true}
-  max-upload-size: ${BOBCREW_MAX_UPLOAD_SIZE:100MB}
+  max-upload-size: ${BOBCREW_MAX_UPLOAD_SIZE:200MB}
   agent:
     # The command run in each session's container (the image's entrypoint runs it). It must speak
     # ACP on stdin/stdout. --auto-approve is deliberately absent: users answer permission requests.

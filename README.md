@@ -412,7 +412,7 @@ session's workspace, in `/opt/workspace` or a folder below it (created if needed
 conversation uploads them to `/opt/workspace` directly. A file of the same name is replaced. The files are
 written by the session's own (non-root) user, so they land only where the agent itself could write, and
 never through a symbolic link. Every upload shows in the conversation with who made it. The limit is
-`bobcrew.max-upload-size` (100 MB) per file; `BOBCREW_FILE_UPLOADS_ENABLED=false` turns uploads off.
+`bobcrew.max-upload-size` (200 MB) per file; `BOBCREW_FILE_UPLOADS_ENABLED=false` turns uploads off.
 
 ## Clearing a session and container metrics
 
@@ -498,7 +498,7 @@ Set as environment variables, or as the Spring properties in
 | `BOBCREW_REVOKED_JTI_FILE` | none | File listing revoked token ids, one per line |
 | `BOBCREW_FILE_DOWNLOADS_ENABLED` | `false` | Whether clients may download files from a session's workspace |
 | `BOBCREW_FILE_UPLOADS_ENABLED` | `true` | Whether clients may upload files into a session's workspace |
-| `BOBCREW_MAX_UPLOAD_SIZE` | `100MB` | Largest file a client may upload |
+| `BOBCREW_MAX_UPLOAD_SIZE` | `200MB` | Largest file a client may upload |
 | `BOBCREW_AGENT_COMMAND` | `bob,acp,--trust,--accept-license,--disable-mcp,--disable-subagents` | The command run in each container, comma separated |
 | `BOB_API_KEY` | none | The Bob API key of sessions created without one of their own ([API keys](#api-keys)): passed to the container as `BOB_API_KEY` and `BOBSHELL_API_KEY` |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | The Docker daemon |
