@@ -87,6 +87,9 @@ body.logged-out main > :not(#login-view) { display: none !important; }
 #new-options[open] { display: grid; gap: 6px; }
 #new-session label.check { display: flex; align-items: center; gap: 6px; }
 #new-session label.check[hidden] { display: none; }
+#new-role-row { display: flex; gap: 6px; }
+#new-role-row[hidden] { display: none; }
+#new-role-row select { flex: 1; min-width: 0; }
 #new-session label.field { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 6px; }
 #new-session label.field input { min-width: 0; }
 #new-limits { margin: 0; font-size: 12px; }
@@ -205,15 +208,23 @@ main.showing-roles > :not(#roles-view):not(#notice) { display: none; }
 #metrics-list dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
 button.active { border-color: var(--accent); color: var(--accent); }
 
-/* the Clear and Upload dialogs */
-#upload-dialog, #clear-dialog {
+/* the Clear, Upload and role dialogs */
+#role-dialog { max-width: min(760px, 90vw); }
+#role-dialog h3 { margin: 0 0 4px; font-size: 15px; }
+#role-dialog .hint { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+#role-dialog dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 0 12px; font-size: 13px; }
+#role-dialog dt { color: var(--muted); }
+#role-dialog dd { margin: 0; overflow-wrap: anywhere; }
+#role-dialog pre { max-height: 40vh; margin: 0 0 12px; padding: 10px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+#role-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
+#upload-dialog, #clear-dialog, #role-dialog {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
   max-width: 480px;
 }
-#clear-dialog::backdrop, #upload-dialog::backdrop { background: rgb(0 0 0 / 40%); }
+#clear-dialog::backdrop, #upload-dialog::backdrop, #role-dialog::backdrop { background: rgb(0 0 0 / 40%); }
 #upload-dialog label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
 #upload-dialog input { font: inherit; color: var(--text); }
 #upload-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }

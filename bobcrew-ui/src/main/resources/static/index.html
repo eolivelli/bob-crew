@@ -22,9 +22,22 @@
   <form id="new-session">
     <select id="new-server" required title="Server"></select>
     <input id="new-title" placeholder="Title (optional)" maxlength="200" autocomplete="off">
-    <select id="new-role" title="Role: the session's image, environment and first prompt" hidden></select>
+    <div id="new-role-row" hidden>
+      <select id="new-role" title="Role: the session's image, secrets, first prompt, and defaults for the options below"></select>
+      <button id="role-info" type="button" disabled title="Show everything the selected role's manifest says">&#9432;</button>
+    </div>
     <details id="new-options">
       <summary>Options</summary>
+      <label class="field">Repository
+        <input id="new-repository" type="url" placeholder="https://… (none)" maxlength="2000" autocomplete="off"
+          pattern="https:\/\/[^\s@?#]+"
+          title="An https git repository cloned into the workspace before the agent starts, without credentials in the URL; the role's by default, empty for none">
+      </label>
+      <label class="field">Branch
+        <input id="new-branch" placeholder="default branch" maxlength="200" autocomplete="off"
+          pattern="[A-Za-z0-9][A-Za-z0-9._\/+\-]*"
+          title="The branch to clone; the role's by default, empty for the repository's default branch">
+      </label>
       <label id="cap-docker-label" class="check" hidden
         title="A Docker Engine of the session's own (the image must have it, as bobcrew/bob-power does). Makes the container privileged: whoever uses the session can become root on the server.">
         <input id="cap-docker" type="checkbox" value="docker"> Docker
@@ -91,6 +104,19 @@
         <button value="keep" type="submit">Clear conversation, keep files</button>
         <button value="wipe" class="danger" type="submit">Clear and delete workspace files</button>
         <button value="cancel" type="submit" class="plain">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="role-dialog">
+    <form method="dialog">
+      <h3 id="role-dialog-name"></h3>
+      <p id="role-dialog-description" class="hint"></p>
+      <dl id="role-dialog-facts"></dl>
+      <p class="hint">The repository, branch, capabilities and resources are defaults: change them under
+        <b>Options</b> before starting the session. The manifest:</p>
+      <pre id="role-dialog-manifest"></pre>
+      <div class="dialog-buttons">
+        <button value="close" type="submit">Close</button>
       </div>
     </form>
   </dialog>

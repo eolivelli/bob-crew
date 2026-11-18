@@ -329,7 +329,9 @@ GitHub repositories. Session creation waits for the clone (up to `bobcrew.git.cl
 and fails, leaving nothing behind, if git does. The first prompt then carries a short note telling the
 agent where the repository is and that it is shallow; the note is not shown as part of the user's text,
 and it is left out after a **Clear** that deleted the workspace. Only `https://` URLs are accepted, never with
-credentials in them.
+credentials in them. The role's repository and branch are defaults: they fill the **Repository** and **Branch**
+fields under **Options**, where they can be changed or emptied before the session starts (and a repository can
+be named there for a role that has none, or without a role).
 
 A role can ask for [capabilities](#capabilities-docker-and-virtual-machines) (`capabilities: docker, libvirt`) and
 [resources](#resources) (`memory: 16GB`, `cpus: 4`);
@@ -337,7 +339,8 @@ A role can ask for [capabilities](#capabilities-docker-and-virtual-machines) (`c
 
 When creating a session, the **Role** list next to the title (shown when there are roles) can pick
 one: once the session exists, the UI sends the role's prompt to it as the first prompt, and a blank title becomes
-the role's name. The **Roles** button in the sidebar lists the roles and shows each manifest; it is read-only.
+the role's name. The **ⓘ** button next to the list shows everything the selected role sets, and its manifest.
+The **Roles** button in the sidebar lists the roles and shows each manifest; it is read-only.
 
 ## Refreshing secrets (expiring tokens)
 
@@ -412,7 +415,8 @@ capabilities, each allowed separately by the server:
 None is allowed unless the server says so, for example `BOBCREW_ALLOWED_CAPABILITIES=docker` or
 `docker,libvirt`. Then each session must ask: the role's `capabilities: docker, libvirt`, or the
 **Docker** and **Virtual machines** boxes under **Options** below the role list (each shown only when the
-selected server allows it; a role's capabilities are ticked and locked). The image must have the tools:
+selected server allows it or the role asks for it; a role's capabilities are ticked to begin with, and can be
+unticked to start the role with only some of them, or none). The image must have the tools:
 `bobcrew/bob-power` has both. A session asking for one the server does not allow gets 403. With Keycloak, a
 user also needs the capability's role (`bobcrew-cap-docker`, `bobcrew-cap-libvirt`): the server's setting is
 the most anyone gets there.
@@ -575,7 +579,8 @@ Notes on Bob:
   user (not by Docker as root), and a symbolic link or a directory at the target is refused.
 - **Repositories**: `https://` only (the allowed schemes are a setting), no credentials, query or fragment in
   the URL, a plain branch name; both go to `git` as separate arguments after `--`, never through a shell.
-  Like the image and variables, the page can only ask for a repository through a role.
+  The UI's page may name one in place of the role's (its user chooses what to clone); the UI app checks it as
+  it checks a role's, and the server checks it again.
 - **User profile files**: paths relative to `/home/bob`, checked by the server (no `..`, `.`, empty segments,
   backslashes, colons or control characters; not under `.bobcrew/`; no file where another needs a directory),
   and written by the session's user through an exec's standard input, each via a temporary file then
@@ -621,10 +626,10 @@ whether it logs its user in with Keycloak, and whether someone is), `/login`, `/
 would carry Keycloak's cross-site origin and be refused), and `GET /api/roles` (`[{"id", "name",
 "description", "image", "secrets", "repository", "branch", "capabilities", "memory", "cpus"}]`, `secrets` being names only) and `GET /api/roles/{id}` (adds
 `prompt` and the raw `manifest`; 404 if there is no such role). It also rewrites `POST /api/sessions`: the page
-sends `{"title", "role", "capabilities", "resources"}`, and the server receives the role's `image`, `secrets` (values from
-`~/.bobcrew/secrets.json`), `userProfile` (files from `~/.bobcrew/user-profile/`) and `repository`, the role's capabilities with any the page adds, and the page's resources or else the role's (header
+sends `{"title", "role", "repository", "capabilities", "resources"}`, and the server receives the role's `image`, `secrets` (values from
+`~/.bobcrew/secrets.json`) and `userProfile` (files from `~/.bobcrew/user-profile/`), the page's `repository` (`{"url", "branch"}`, or null for none) or else the role's, the page's capabilities (a list, possibly empty) or else the role's, and the page's resources or else the role's (header
 `X-BobCrew-Missing-Secrets` lists the secrets the file does not have; the page may not send `image`, `env`,
-`secrets`, `userProfile` or `repository` itself). It rewrites `PUT /api/sessions/{id}/secrets` too: the page sends
+`secrets` or `userProfile` itself). It rewrites `PUT /api/sessions/{id}/secrets` too: the page sends
 nothing, and the server receives the values the secrets file has now for the session's secrets (the same header
 lists those it lacks). Uploads are streamed through it; other request
 bodies are limited to 2 MB.

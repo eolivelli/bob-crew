@@ -99,7 +99,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 
 | Class | Role |
 |---|---|
-| `ProxyController` | Forwards `/api/**` to the server with the server's token, or the user's login (`OidcLogin.currentToken()`; 401 `{"login": "/login"}` without one); streams responses through, and upload request bodies too (other bodies are read whole, up to 2 MB). Rewrites a secrets refresh (`PUT .../sessions/{id}/secrets`: nothing in, the secrets file's values for the session's secret names out). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`), `userProfile` (from `UserProfileStore`) and `repository` out; refuses `image`/`env`/`secrets`/`repository` sent by the browser. |
+| `ProxyController` | Forwards `/api/**` to the server with the server's token, or the user's login (`OidcLogin.currentToken()`; 401 `{"login": "/login"}` without one); streams responses through, and upload request bodies too (other bodies are read whole, up to 2 MB). Rewrites a secrets refresh (`PUT .../sessions/{id}/secrets`: nothing in, the secrets file's values for the session's secret names out). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`), `userProfile` (from `UserProfileStore`) and `repository` out; the browser's `repository` (or null) and `capabilities` replace the role's; refuses `image`/`env`/`secrets`/`userProfile` sent by the browser. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
 | `ServerConnection` | Server URL, token (none when the login provides it), and the HTTP client with the trusted CA. |
 | `OidcLogin`, `LoginController` | The user's Keycloak login: authorization code with PKCE as a public client, `state` once and for 10 minutes, tokens in memory only, refreshed 30 s before expiry; `/login`, `/login/callback`, `/logout`, `/api/login`. |
@@ -235,8 +235,10 @@ the maintainer.
   this the default, never apply it to sessions that did not ask, and keep host mounts out of it too (image
   `VOLUME`s are anonymous and removed with the container).
 - Session creation from the browser goes through the UI's role expansion: the page never sees
-  secret values and cannot pick an image, secrets, variables, user profile files or a repository itself. It may ask for
-  `capabilities` and `resources`; the server decides whether they are allowed.
+  secret values and cannot pick an image, secrets, variables or user profile files itself. It may name the
+  `repository` and branch to clone (the role's are the default; `ProxyController` checks the page's with the
+  role's patterns, https and no credentials, and the server checks again), and ask for `capabilities` (the role's
+  are the default, the page's list replaces them) and `resources`; the server decides whether they are allowed.
 - A session is its owner's: other users see it only once it is shared with them, and only the owner or an admin
   closes or re-shares it. Every endpoint reaches a session through `SessionManager` with the caller's name, which
   asks `SessionAccessPolicy`; a session the caller may not use answers 404, never 403, so that its existence does

@@ -140,8 +140,9 @@ async function refreshRoles() {
     return option;
   }));
   if (state.roles.some((role) => role.id === prev)) dropdown.value = prev;
-  dropdown.hidden = !state.roles.length;
-  updateOptions(true);
+  $('new-role-row').hidden = !state.roles.length;
+  // only when the selection changed, so that what the user typed under Options survives a refresh
+  updateOptions(dropdown.value !== prev);
 }
 
 const CAPABILITIES = ['docker', 'libvirt'];
@@ -164,27 +165,24 @@ async function refreshServerLimits() {
   updateOptions(false);
 }
 
-// A capability box shows when the server allows it or the role asks for it; the role's ones are ticked and
-// locked. With roleChanged, the memory and CPU fields take the role's values.
+// A capability box shows when the server allows it or the role asks for it. With roleChanged, everything
+// under Options takes the role's values, which are defaults: the user may change any of them, and untick
+// the role's capabilities.
 function updateOptions(roleChanged) {
   const limits = state.serverLimits.get($('new-server').value) || { capabilities: [] };
   const role = state.roles.find((r) => r.id === $('new-role').value);
   const fromRole = (role && role.capabilities) || [];
+  $('role-info').disabled = !role;
   for (const name of CAPABILITIES) {
-    const box = $(`cap-${name}`);
     $(`cap-${name}-label`).hidden = !limits.capabilities.includes(name) && !fromRole.includes(name);
-    if (fromRole.includes(name)) {
-      box.checked = true;
-      box.disabled = true;
-    } else {
-      if (box.disabled) box.checked = false;
-      box.disabled = false;
-    }
+    if (roleChanged) $(`cap-${name}`).checked = fromRole.includes(name);
   }
   if (roleChanged) {
+    $('new-repository').value = (role && role.repository) || '';
+    $('new-branch').value = (role && role.branch) || '';
     $('new-memory').value = (role && role.memory) || '';
     $('new-cpus').value = (role && role.cpus) || '';
-    if (fromRole.length) $('new-options').open = true;
+    if (fromRole.length || (role && role.repository)) $('new-options').open = true;
   }
   const caps = [limits.maxMemoryBytes ? `memory up to ${formatBytes(limits.maxMemoryBytes)}` : '',
     limits.maxCpus ? `up to ${limits.maxCpus} CPUs` : ''].filter(Boolean);
@@ -549,8 +547,12 @@ $('new-session').addEventListener('submit', async (submit) => {
     const roleId = $('new-role').value;
     // fetched first, so that a vanished role stops us before a session is created
     const role = roleId ? await api('GET', `/roles/${encodeURIComponent(roleId)}`) : null;
-    // the server clones the role's repository before it answers, which can take a while
-    button.textContent = role && role.repository ? 'Cloning the repository…' : 'Starting…';
+    // the fields under Options hold the role's repository and branch unless the user changed them
+    const url = $('new-repository').value.trim();
+    const branch = $('new-branch').value.trim();
+    if (branch && !url) throw new Error('A branch needs a repository: fill in the repository, or clear the branch.');
+    // the server clones the repository before it answers, which can take a while
+    button.textContent = url ? 'Cloning the repository…' : 'Starting…';
     const createPath = server ? `/servers/${encodeURIComponent(server)}/sessions` : '/sessions';
     // the UI app turns the role into the image and secrets; their values never come here
     const capabilities = CAPABILITIES.filter((name) => $(`cap-${name}`).checked && !$(`cap-${name}-label`).hidden);
@@ -560,7 +562,9 @@ $('new-session').addEventListener('submit', async (submit) => {
     const response = await call('POST', createPath, {
       title: $('new-title').value.trim() || (role ? role.name : ''),
       ...(role ? { role: role.id } : {}),
-      ...(capabilities.length ? { capabilities } : {}),
+      // with a role, always sent, even empty or null: they replace the role's own
+      ...(url ? { repository: { url, ...(branch ? { branch } : {}) } } : role ? { repository: null } : {}),
+      ...(capabilities.length || role ? { capabilities } : {}),
       ...(Object.keys(resources).length ? { resources } : {}),
     });
     const session = await response.json();
@@ -928,6 +932,19 @@ async function showRoles() {
   showRole(state.roles[0].id, list.firstElementChild);
 }
 
+// Everything a role's manifest sets, as [label, value] pairs, for the roles view and the role dialog.
+function roleFacts(role) {
+  return [
+    ['Image', role.image || "the server's default"],
+    ["Secrets passed from this computer's secrets.json", role.secrets && role.secrets.length ? role.secrets.join(', ') : 'none'],
+    ['Repository cloned into the workspace', role.repository || 'none'],
+    ...(role.repository ? [['Branch', role.branch || "the repository's default"]] : []),
+    ['Capabilities (privileged container)', role.capabilities && role.capabilities.length ? role.capabilities.join(', ') : 'none'],
+    ['Memory', role.memory || "the server's default"],
+    ['CPUs', role.cpus ? String(role.cpus) : "the server's default"],
+  ];
+}
+
 async function showRole(id, item) {
   for (const other of $('roles-list').children) other.classList.remove('selected');
   item.classList.add('selected');
@@ -935,19 +952,29 @@ async function showRole(id, item) {
     const role = await api('GET', `/roles/${encodeURIComponent(id)}`);
     $('role-name').textContent = `${role.name} (${role.id})`;
     $('role-description').textContent = [role.description,
-      `Image: ${role.image || "the server's default"}`,
-      `Secrets passed from this computer's secrets.json: ${role.secrets && role.secrets.length ? role.secrets.join(', ') : 'none'}`,
-      ...(role.repository ? [`Repository cloned into the workspace: ${role.repository}`
-        + (role.branch ? ` (branch ${role.branch})` : ' (default branch)')] : []),
-      ...(role.capabilities && role.capabilities.length
-        ? [`Capabilities (privileged container): ${role.capabilities.join(', ')}`] : []),
-      ...(role.memory || role.cpus ? [`Resources: ${role.memory || 'default'} memory, ${role.cpus || 'default'} CPUs`] : [])]
-      .filter(Boolean).join(' · ');
+      ...roleFacts(role).map(([label, value]) => `${label}: ${value}`)].filter(Boolean).join(' · ');
     $('role-manifest').textContent = role.manifest;
   } catch (e) {
     notify(e.message);
   }
 }
+
+// The dialog next to the role list: the selected role's settings and its manifest as written.
+$('role-info').addEventListener('click', async () => {
+  const id = $('new-role').value;
+  if (!id) return;
+  try {
+    const role = await api('GET', `/roles/${encodeURIComponent(id)}`);
+    $('role-dialog-name').textContent = `${role.name} (${role.id})`;
+    $('role-dialog-description').textContent = role.description || '';
+    $('role-dialog-facts').replaceChildren(...roleFacts(role)
+      .flatMap(([label, value]) => [el('dt', '', label), el('dd', '', value)]));
+    $('role-dialog-manifest').textContent = role.manifest;
+    $('role-dialog').showModal();
+  } catch (e) {
+    notify(e.message);
+  }
+});
 
 $('show-roles').addEventListener('click', () => showRoles());
 $('hide-roles').addEventListener('click', () => hideRoles());

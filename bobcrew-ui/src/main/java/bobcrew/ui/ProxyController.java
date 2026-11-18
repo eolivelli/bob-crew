@@ -36,8 +36,10 @@ import tools.jackson.databind.node.ObjectNode;
  * <p>Creating a session is the one request it rewrites: the browser names a {@code role}, and the request
  * forwarded carries that role's {@code image}, {@code secrets} (with their values from the secrets file,
  * {@link SecretStore}) and {@code repository}. So the values never pass through the browser, and the page cannot
- * choose an image, pass secrets or variables, or have a repository cloned by itself: a request that tries is
- * refused. Nothing comes from this app's own environment.
+ * choose an image or pass secrets or variables: a request that tries is refused. Nothing comes from this app's
+ * own environment. What the user may change when starting a session is the repository to clone (the role's is
+ * the default; the page's own, or none, replaces it), the capabilities (the role's are the default; the
+ * page's list replaces them) and the resources.
  *
  * <p>Refreshing a session's secrets ({@code PUT .../sessions/{id}/secrets}) is rewritten the same way: the browser
  * sends nothing, and the request forwarded carries the values the secrets file has now for the secrets the session
@@ -262,8 +264,23 @@ class ProxyController {
      * Turns the browser's {@code {"title": ..., "role": ...}} into what the server takes:
      * {@code {"title": ..., "image": ..., "secrets": {...}, "repository": {"url": ..., "branch": ...}}}. Secrets the
      * role lists but the secrets file does not have are left out and added to {@code missingSecrets} (names only).
+     * A {@code repository} or {@code capabilities} the page sends replaces the role's ({@code "repository": null}
+     * and {@code "capabilities": []} meaning none); left out, the role's apply.
      * @return the body to forward, or empty if an error was sent instead
      */
+    /** Whether the page's {@code repository} is {@code {"url": ..., "branch": ...}} as a role could have it. */
+    private static boolean validRepository(JsonNode repository) {
+        if (!(repository instanceof ObjectNode)
+                || !repository.propertyNames().stream().allMatch(n -> n.equals("url") || n.equals("branch"))) {
+            return false;
+        }
+        JsonNode url = repository.get("url");
+        JsonNode branch = repository.get("branch");
+        return url != null && url.isString() && RoleRegistry.REPOSITORY.matcher(url.asString()).matches()
+                && (branch == null || branch.isString() && RoleRegistry.BRANCH.matcher(branch.asString()).matches()
+                        && !branch.asString().contains(".."));
+    }
+
     private Optional<byte[]> expandRole(byte[] body, List<String> missingSecrets, HttpServletResponse response)
             throws IOException {
         ObjectNode request;
@@ -278,10 +295,19 @@ class ProxyController {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST, "The request is not valid JSON");
             return Optional.empty();
         }
-        if (request.has("image") || request.has("env") || request.has("secrets") || request.has("repository")
-                || request.has("userProfile")) {
+        if (request.has("image") || request.has("env") || request.has("secrets") || request.has("userProfile")) {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-                    "The image, secrets, userProfile and repository of a session come from its role or configuration");
+                    "The image, secrets and userProfile of a session come from its role or configuration");
+            return Optional.empty();
+        }
+        // the user may name the repository to clone, or none, instead of the role's; the server checks it again
+        boolean repositoryChosen = request.has("repository");
+        JsonNode chosenRepository = request.get("repository");
+        if (repositoryChosen && chosenRepository.isNull()) {
+            request.remove("repository");
+        } else if (repositoryChosen && !validRepository(chosenRepository)) {
+            sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+                    "The repository must be an https URL without credentials, and the branch a plain branch name");
             return Optional.empty();
         }
         // the page may ask for capabilities and resources itself; the server checks the values
@@ -330,21 +356,17 @@ class ProxyController {
             if (!passed.isEmpty()) {
                 request.set("secrets", passed);
             }
-            if (role.get().repository() != null) {
+            if (!repositoryChosen && role.get().repository() != null) {
                 ObjectNode repository = request.putObject("repository");
                 repository.put("url", role.get().repository());
                 if (role.get().branch() != null) {
                     repository.put("branch", role.get().branch());
                 }
             }
-            // the role's capabilities always apply, with any the page adds
-            if (!role.get().capabilities().isEmpty()) {
-                ArrayNode merged = request.putArray("capabilities");
-                java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>(role.get().capabilities());
-                if (capabilities != null) {
-                    capabilities.valueStream().forEach(name -> names.add(name.asString()));
-                }
-                names.forEach(merged::add);
+            // the role's capabilities are a default: a list from the page, even an empty one, replaces them
+            if (capabilities == null && !role.get().capabilities().isEmpty()) {
+                ArrayNode fromRole = request.putArray("capabilities");
+                role.get().capabilities().forEach(fromRole::add);
             }
             // the role's resources, unless the page sends its own
             if (role.get().memory() != null || role.get().cpus() != null) {
@@ -363,11 +385,12 @@ class ProxyController {
             log.info("Creating a session with role {} (image {}, secrets {}, not in the secrets file: {}, repository {}, "
                     + "capabilities {}, resources {})",
                     role.get().id(), role.get().image() == null ? "default" : role.get().image(), passed.propertyNames(),
-                    missingSecrets, role.get().repository() == null ? "none" : role.get().repository(),
+                    missingSecrets, request.path("repository").path("url").asString("none"),
                     request.path("capabilities"), request.path("resources"));
         } else {
-            log.info("Creating a session without role (image default, secrets [], repository none, "
+            log.info("Creating a session without role (image default, secrets [], repository {}, "
                     + "capabilities {}, resources {})",
+                    request.path("repository").path("url").asString("none"),
                     request.path("capabilities"), request.path("resources"));
         }
         List<ProfileFile> profileFiles;

@@ -274,14 +274,38 @@ class UiProxyTest {
         assertThat(post("/api/sessions", "{\"role\":\"cloner\"}").body()).contains("\"body\":{\"repository\":"
                 + "{\"url\":\"https://github.com/datastax/cassandra\",\"branch\":\"main\"}}");
 
-        // a role's capabilities always apply, with any the page adds; its resources unless the page sends its own
+        // the user may pick another repository or branch, or none, and may do so without a role
+        assertThat(post("/api/sessions", "{\"role\":\"cloner\",\"repository\":{\"url\":\"https://github.com/o/r\","
+                + "\"branch\":\"feature/x\"}}").body())
+            .contains("\"body\":{\"repository\":{\"url\":\"https://github.com/o/r\",\"branch\":\"feature/x\"}}");
+        assertThat(post("/api/sessions", "{\"role\":\"cloner\",\"repository\":{\"url\":\"https://github.com/o/r\"}}")
+            .body()).as("the role's branch does not follow another repository")
+            .contains("\"body\":{\"repository\":{\"url\":\"https://github.com/o/r\"}}");
+        assertThat(post("/api/sessions", "{\"role\":\"cloner\",\"repository\":null}").body()).contains("\"body\":{}");
+        assertThat(post("/api/sessions", "{\"repository\":{\"url\":\"https://github.com/o/r\"}}").body())
+            .contains("\"body\":{\"repository\":{\"url\":\"https://github.com/o/r\"}}");
+        for (String bad : new String[] {"{\"repository\":\"https://github.com/o/r\"}", "{\"repository\":{}}",
+                "{\"repository\":{\"url\":\"http://github.com/o/r\"}}", "{\"repository\":{\"url\":\"file:///etc\"}}",
+                "{\"repository\":{\"url\":\"https://user:pw@github.com/o/r\"}}",
+                "{\"repository\":{\"url\":\"https://github.com/o/r\",\"branch\":\"--upload-pack=x\"}}",
+                "{\"repository\":{\"url\":\"https://github.com/o/r\",\"branch\":\"a..b\"}}",
+                "{\"repository\":{\"url\":\"https://github.com/o/r\",\"branch\":1}}",
+                "{\"repository\":{\"url\":\"https://github.com/o/r\",\"directory\":\"x\"}}",
+                "{\"role\":\"cloner\",\"repository\":{\"branch\":\"main\"}}"}) {
+            assertThat(post("/api/sessions", bad).statusCode()).as(bad).isEqualTo(400);
+        }
+
+        // a role's capabilities are a default that the page's list replaces; its resources unless the page sends its own
         assertThat(post("/api/sessions", "{\"role\":\"power\"}").body())
             .contains("\"body\":{\"image\":\"bobcrew/bob-power:latest\",\"capabilities\":[\"docker\"],"
                     + "\"resources\":{\"memory\":\"8GB\",\"cpus\":2.0}}");
         assertThat(post("/api/sessions", "{\"role\":\"power\",\"capabilities\":[\"libvirt\"],"
                 + "\"resources\":{\"cpus\":4}}").body())
-            .contains("\"capabilities\":[\"docker\",\"libvirt\"]")
+            .contains("\"capabilities\":[\"libvirt\"]")
             .contains("\"resources\":{\"memory\":\"8GB\",\"cpus\":4}");
+        assertThat(post("/api/sessions", "{\"role\":\"power\",\"capabilities\":[]}").body())
+            .as("a role's capabilities can all be deselected")
+            .contains("\"body\":{\"capabilities\":[],\"image\":\"bobcrew/bob-power:latest\",");
         // without a role the page may ask for them itself; the server decides
         assertThat(post("/api/sessions", "{\"capabilities\":[\"docker\"],\"resources\":{\"memory\":\"1GB\"}}").body())
             .contains("\"body\":{\"capabilities\":[\"docker\"],\"resources\":{\"memory\":\"1GB\"}}");
@@ -303,8 +327,7 @@ class UiProxyTest {
     void thePageCannotChooseTheImageOrEnvironmentItself() throws Exception {
         for (String body : new String[] {"{\"image\":\"evil/image\"}", "{\"env\":{\"X\":\"1\"}}",
                 "{\"secrets\":{\"X\":\"1\"}}", "{\"userProfile\":[]}", "{\"role\":\"builder\",\"secrets\":{}}",
-                "{\"role\":\"builder\",\"env\":{}}", "{\"repository\":{\"url\":\"https://evil.example/x\"}}",
-                "{\"role\":\"cloner\",\"repository\":null}"}) {
+                "{\"role\":\"builder\",\"env\":{}}"}) {
             HttpResponse<String> refused = post("/api/sessions", body);
             assertThat(refused.statusCode()).as(body).isEqualTo(400);
             assertThat(refused.body()).as(body).doesNotContain("\"method\"").doesNotContain("secret-gh-token");
