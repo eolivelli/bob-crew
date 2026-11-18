@@ -15,7 +15,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * event before it is gone from the log, and clients show an empty transcript from here),
  * {@code file_uploaded} (a user put a file in the workspace) or {@code repository_cloned} (the repository
  * the session was created with is checked out in the workspace) or {@code shared} (the owner changed who else
- * may use the session; {@code data.users} is the new list)
+ * may use the session; {@code data.users} is the new list) or {@code secrets_refreshed} (a user replaced the
+ * values of the secrets {@code data.names})
  * @param user who caused it, for events caused by a user
  * @param data the details, depending on the type
  */
@@ -43,4 +44,6 @@ public record UiEvent(long seq, Instant time, String type, String user, Object d
     public static final String REPOSITORY_CLONED = "repository_cloned";
 
     public static final String SHARED = "shared";
+
+    public static final String SECRETS_REFRESHED = "secrets_refreshed";
 }

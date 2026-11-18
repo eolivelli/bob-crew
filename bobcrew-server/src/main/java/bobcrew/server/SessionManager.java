@@ -345,6 +345,18 @@ public class SessionManager {
         return session.info();
     }
 
+    /**
+     * Replaces the values of secrets the session has, in its running container. Only its owner or an admin may:
+     * the session then acts with the caller's credentials.
+     * @throws ApiException 400 for bad secrets or ones the session does not have, 403 if the user may not, 404
+     * as {@link #get}, 409 if the session is not open
+     */
+    AgentSession.Info refreshSecrets(Caller caller, String id, Map<String, String> secrets) {
+        AgentSession session = getToManage(caller, id, "refresh its secrets");
+        session.refreshSecrets(caller.name(), checkSecrets(secrets));
+        return session.info();
+    }
+
     List<AgentSession.Info> list(Caller caller) {
         return sessions.values()
             .stream()

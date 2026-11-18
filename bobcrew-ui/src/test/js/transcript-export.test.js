@@ -23,6 +23,7 @@ const events = [
   ev(14, 'status', { status: 'IDLE' }),
   ev(15, 'shared', { users: ['bob', evil] }, 'alice'),
   ev(16, 'shared', { users: [] }, 'alice'),
+  ev(17, 'secrets_refreshed', { names: ['GH_TOKEN', evil] }, 'alice'),
 ];
 const session = { id: 'abc', title: 'My <b>session</b> / x', agent: 'Bob 2.1.0', image: 'bobcrew/bob-<base>:latest', owner: 'alice' };
 const html = ctx.buildTranscriptHtml(session, events, { exportedAt: new Date('2026-11-13T11:00:00Z'), exportedBy: 'me' });
@@ -37,6 +38,8 @@ assert(html.includes('<li class="completed">a</li>') && !html.includes('in_progr
 assert(html.includes('alice chose: Allow'));
 assert(html.includes('alice shared the session with bob, &lt;script&gt;'), 'sharing shown, escaped');
 assert(html.includes('alice stopped sharing the session'));
+assert(html.includes('alice refreshed the session&#39;s secrets: GH_TOKEN, &lt;script&gt;')
+  || html.includes("alice refreshed the session's secrets: GH_TOKEN, &lt;script&gt;"), 'secrets refresh shown, escaped');
 assert(html.includes('turn ended: cancelled'));
 assert.strictEqual(ctx.turnEndText('end_turn'), 'turn ended', 'a normal turn end is marked too');
 assert.strictEqual(ctx.turnEndText(undefined), 'turn ended');

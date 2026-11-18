@@ -39,6 +39,11 @@ import tools.jackson.databind.node.ObjectNode;
  * choose an image, pass secrets or variables, or have a repository cloned by itself: a request that tries is
  * refused. Nothing comes from this app's own environment.
  *
+ * <p>Refreshing a session's secrets ({@code PUT .../sessions/{id}/secrets}) is rewritten the same way: the browser
+ * sends nothing, and the request forwarded carries the values the secrets file has now for the secrets the session
+ * was created with (the server knows their names; nobody remembers the role). That is how a token that expired is
+ * replaced in a running session.
+ *
  * <p>Request bodies are read whole (up to {@link #MAX_BODY}) before forwarding, except file uploads
  * ({@code PUT .../sessions/{id}/files}), which are streamed: the server enforces their size limit.
  */
@@ -54,6 +59,9 @@ class ProxyController {
 
     /** A file upload, which is streamed rather than read into memory. */
     private static final Pattern UPLOAD_PATH = Pattern.compile("/api/sessions/[^/]+/files");
+
+    /** Replacing the values of a session's secrets, which this app fills in from the secrets file. */
+    private static final Pattern SECRETS_PATH = Pattern.compile("/api/sessions/[^/]+/secrets");
 
     /** Creating a session waits for the server to clone the role's repository, which can take minutes. */
     private static final Duration CREATE_TIMEOUT = Duration.ofMinutes(15);
@@ -158,6 +166,7 @@ class ProxyController {
 
         boolean upload = request.getMethod().equals("PUT") && UPLOAD_PATH.matcher(forwardedPath).matches();
         boolean create = request.getMethod().equals("POST") && forwardedPath.equals("/api/sessions");
+        boolean refresh = request.getMethod().equals("PUT") && SECRETS_PATH.matcher(forwardedPath).matches();
         List<String> missingSecrets = new ArrayList<>();
         HttpRequest.BodyPublisher publisher;
         if (upload) {
@@ -177,6 +186,12 @@ class ProxyController {
                     return;
                 }
                 body = expanded.get();
+            } else if (refresh) {
+                Optional<byte[]> filled = fillSecrets(server, token, forwardedPath, body, missingSecrets, response);
+                if (filled.isEmpty()) {
+                    return;
+                }
+                body = filled.get();
             }
             publisher = body.length == 0 ? HttpRequest.BodyPublishers.noBody()
                     : HttpRequest.BodyPublishers.ofByteArray(body);
@@ -190,6 +205,10 @@ class ProxyController {
         }
         for (String name : FORWARDED_REQUEST_HEADERS) {
             String value = request.getHeader(name);
+            if (refresh && name.equals("Content-Type")) {
+                // the body is this app's, whatever the browser said of its own (empty) one
+                value = "application/json";
+            }
             if (value != null) {
                 forwarded.header(name, value);
             }
@@ -209,13 +228,7 @@ class ProxyController {
 
         try (InputStream in = upstream.body()) {
             if (upstream.statusCode() == HttpServletResponse.SC_UNAUTHORIZED) {
-                if (server.token() == null) {
-                    sendLogin(response, "The bob-crew server " + server.name() + " did not accept your login; "
-                            + "log in again, or check that it trusts the same identity provider as this UI");
-                } else {
-                    sendError(response, HttpServletResponse.SC_BAD_GATEWAY,
-                            "The bob-crew server rejected the configured token (expired, revoked or wrong)");
-                }
+                sendUnauthorized(server, response);
                 return;
             }
             response.setStatus(upstream.statusCode());
@@ -374,6 +387,103 @@ class ProxyController {
             }
         }
         return Optional.of(json.writeValueAsBytes(request));
+    }
+
+    /**
+     * Makes the body of a request to replace a session's secrets: {@code {"secrets": {...}}} with the values the
+     * secrets file has now for the secrets the session was created with, whose names the server is asked for.
+     * Those the file does not have are left as they are in the session, and added to {@code missingSecrets}
+     * (names only). The browser sends no values, as when a session is created.
+     * @return the body to forward, or empty if an error was sent instead
+     */
+    private Optional<byte[]> fillSecrets(ServerConnection server, String token, String forwardedPath, byte[] body,
+            List<String> missingSecrets, HttpServletResponse response) throws IOException {
+        try {
+            JsonNode sent = body.length == 0 ? json.createObjectNode() : json.readTree(body);
+            if (!(sent instanceof ObjectNode) || !sent.isEmpty()) {
+                sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+                        "The values of a session's secrets come from this UI's secrets file; send no body");
+                return Optional.empty();
+            }
+        } catch (JacksonException e) {
+            sendError(response, HttpServletResponse.SC_BAD_REQUEST, "The request is not valid JSON");
+            return Optional.empty();
+        }
+        String sessionPath = forwardedPath.substring(0, forwardedPath.length() - "/secrets".length());
+        HttpResponse<byte[]> session;
+        try {
+            session = server.client().send(HttpRequest.newBuilder(URI.create(server.baseUri() + sessionPath))
+                .header("Authorization", "Bearer " + token)
+                .timeout(Duration.ofSeconds(30))
+                .GET()
+                .build(), HttpResponse.BodyHandlers.ofByteArray());
+        } catch (IOException e) {
+            log.warn("Cannot reach {}: {}", server.baseUri(), e.toString());
+            sendError(response, HttpServletResponse.SC_BAD_GATEWAY, "Cannot reach the bob-crew server: " + e.getMessage());
+            return Optional.empty();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Optional.empty();
+        }
+        if (session.statusCode() == HttpServletResponse.SC_UNAUTHORIZED) {
+            sendUnauthorized(server, response);
+            return Optional.empty();
+        }
+        JsonNode info;
+        try {
+            info = json.readTree(session.body());
+        } catch (JacksonException e) {
+            info = json.createObjectNode();
+        }
+        if (session.statusCode() != HttpServletResponse.SC_OK) {
+            // "No such session", for one: as the server put it
+            sendError(response, session.statusCode(), info.path("error").asString("The session cannot be read"));
+            return Optional.empty();
+        }
+        List<String> names = new ArrayList<>();
+        info.path("secrets").valueStream().forEach(name -> names.add(name.asString("")));
+        if (names.isEmpty()) {
+            sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+                    "This session was created without secrets, so there is nothing to refresh");
+            return Optional.empty();
+        }
+        Map<String, String> available;
+        try {
+            available = secrets.load();
+        } catch (IllegalStateException e) {
+            sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+            return Optional.empty();
+        }
+        ObjectNode passed = json.createObjectNode();
+        for (String name : names) {
+            String value = available.get(name);
+            if (value == null) {
+                missingSecrets.add(name);
+            } else {
+                passed.put(name, value);
+            }
+        }
+        if (passed.isEmpty()) {
+            sendError(response, HttpServletResponse.SC_BAD_REQUEST, "None of the session's secrets ("
+                    + String.join(", ", names) + ") is in the secrets file, so nothing was refreshed");
+            return Optional.empty();
+        }
+        log.info("Refreshing the secrets {} of a session (not in the secrets file: {})", passed.propertyNames(),
+                missingSecrets);
+        ObjectNode request = json.createObjectNode();
+        request.set("secrets", passed);
+        return Optional.of(json.writeValueAsBytes(request));
+    }
+
+    /** The server refused the token: the user logs in again, or the configured token is to be replaced. */
+    private void sendUnauthorized(ServerConnection server, HttpServletResponse response) throws IOException {
+        if (server.token() == null) {
+            sendLogin(response, "The bob-crew server " + server.name() + " did not accept your login; "
+                    + "log in again, or check that it trusts the same identity provider as this UI");
+        } else {
+            sendError(response, HttpServletResponse.SC_BAD_GATEWAY,
+                    "The bob-crew server rejected the configured token (expired, revoked or wrong)");
+        }
     }
 
     /** 401, and where the page sends the user to log in. */

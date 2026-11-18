@@ -339,6 +339,22 @@ When creating a session, the **Role** list next to the title (shown when there a
 one: once the session exists, the UI sends the role's prompt to it as the first prompt, and a blank title becomes
 the role's name. The **Roles** button in the sidebar lists the roles and shows each manifest; it is read-only.
 
+## Refreshing secrets (expiring tokens)
+
+Secrets are given to a session when it is created, and credentials expire: a GitHub fine-grained personal
+access token lasts days or months, and GitHub has no way to renew one but by hand on its website. To replace
+it in sessions that are running, make the new token, put it in `~/.bobcrew/secrets.json`, and click **Refresh
+secrets** in the session's header, or **Refresh secrets in my sessions** in the sidebar for all your open
+sessions. The UI app reads the file again and sends the values it has now for the secrets the session was
+created with; the server replaces their files in the running container and runs the image's setup again, so
+with bob-base `gh` and `git` use the new token from the next command on, and `GIT_USER_NAME` and
+`GIT_USER_EMAIL` apply too. The agent is not restarted, and the conversation shows who refreshed which
+secrets (names only).
+
+Only the secrets a session was created with can be replaced, not new ones added; a secret the file no longer
+has stays as it was, and the page says which. Only the session's owner (or an admin) may: the session then
+acts with their credentials. It happens when you click, with the UI running: nothing renews a token by itself.
+
 ## User profile files
 
 Files in `~/.bobcrew/user-profile/` (or `bobcrew.ui.user-profile-dir`) on the UI's machine are copied into the
@@ -549,7 +565,10 @@ Notes on Bob:
   server forgets the values once written; they live in memory and go with the container. Only their names are
   logged and returned (`secrets` in the session's details). This does not hide them from the agent, which can
   read the files: anyone who can use a session (its owner, the users it is shared with, admins) can ask the
-  agent for them. The UI's values come from `~/.bobcrew/secrets.json`, never from its environment.
+  agent for them. The UI's values come from `~/.bobcrew/secrets.json`, never from its environment. The owner
+  (or an admin) can replace the values of a running session's secrets, the same way and with the same care:
+  the agent runs as the same user by then, so each file is written under a fresh temporary name and renamed
+  over whatever is at its place, never through a link the agent left there.
 - **File downloads**: the path must stay inside `/opt/workspace`, and only regular files are served, so
   a symbolic link cannot lead elsewhere in the container.
 - **File uploads**: the path must stay inside `/opt/workspace`; the file is written by the session's
@@ -585,6 +604,7 @@ Keycloak user without the access role.
 | `GET /sessions/{id}` | One session: `id`, `owner`, `sharedWith`, `title`, `image`, `containerId`, `secrets` (names), `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
 | `DELETE /sessions/{id}` | Closes it and removes its container. Owner or admin only (403 for users it is shared with) |
 | `PUT /sessions/{id}/sharing` `{"users": ["bob", "carol"]}` | Shares the session with exactly these users (`[]`: nobody else), and records a `shared` event. Owner or admin only (403 for users it is shared with); at most 50 names |
+| `PUT /sessions/{id}/secrets` `{"secrets": {"NAME": "value"}}` | Replaces the values of secrets the session was created with, in the running container, runs the image's setup again, and records a `secrets_refreshed` event. Owner or admin only (403 for users it is shared with); 400 for a secret the session does not have, 409 if the session is not open |
 | `GET /sessions/{id}/file?path=<path>` | Downloads a regular file from the session's workspace; `path` is relative to `/opt/workspace` or absolute inside it, `file://` allowed (403 if downloads are disabled) |
 | `PUT /sessions/{id}/files?path=<path>` (the file as the body) | Writes a file into the workspace, creating directories and replacing a file there; `path` as for downloads. Answers 201 `{"path", "size"}`; 400 for a path outside the workspace, a link or a directory, 413 if too large, 403 if uploads are disabled |
 | `GET /sessions/{id}/metrics` | A snapshot of the container: `state`, `startedAt`, `uptimeSeconds`, `cpuPercent` (100 = one core), `memoryUsageBytes`, `memoryLimitBytes`, `pids`, `networkRxBytes`, `networkTxBytes`, `blockReadBytes`, `blockWriteBytes`. Docker samples for a second or two |
@@ -604,20 +624,23 @@ would carry Keycloak's cross-site origin and be refused), and `GET /api/roles` (
 sends `{"title", "role", "capabilities", "resources"}`, and the server receives the role's `image`, `secrets` (values from
 `~/.bobcrew/secrets.json`), `userProfile` (files from `~/.bobcrew/user-profile/`) and `repository`, the role's capabilities with any the page adds, and the page's resources or else the role's (header
 `X-BobCrew-Missing-Secrets` lists the secrets the file does not have; the page may not send `image`, `env`,
-`secrets`, `userProfile` or `repository` itself). Uploads are streamed through it; other request
+`secrets`, `userProfile` or `repository` itself). It rewrites `PUT /api/sessions/{id}/secrets` too: the page sends
+nothing, and the server receives the values the secrets file has now for the session's secrets (the same header
+lists those it lacks). Uploads are streamed through it; other request
 bodies are limited to 2 MB.
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,
 `permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here; `data.workspaceWiped` says whether the files went too), `file_uploaded` (`user` uploaded `data.path`, `data.size` bytes), `repository_cloned` (`data.url`, `data.branch`, `data.path`), `shared` (`user` shared the session with
-`data.users`, the whole new list). The server keeps the last 5000 events of a
+`data.users`, the whole new list), `secrets_refreshed` (`user` replaced the values of the secrets `data.names`). The server keeps the last 5000 events of a
 session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss nothing.
 
 ## Not in this version
 
 One process on one machine, by design. A later version can split it into workers (which own the
 agent containers), stateless coordinators and a small metadata store; `SessionManager` is the seam
-for that. Also not done yet: per-user API keys, cloning over ssh, re-cloning after a wipe,
+for that. Also not done yet: per-user API keys, renewing GitHub tokens without a person (a GitHub App whose
+8-hour user tokens the UI would refresh and send to its sessions), cloning over ssh, re-cloning after a wipe,
 resuming a session after a restart, workspaces that outlive their
 session or are shared between sessions, pulling images, per-session network policies, metrics history,
 capabilities without a privileged container (with a runtime such as Sysbox), a UI shared by many users (each

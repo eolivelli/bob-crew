@@ -128,8 +128,14 @@ class UiProxyTest {
             respond(exchange, 201, "application/json", "{\"method\":\"" + exchange.getRequestMethod()
                     + "\",\"uri\":\"" + exchange.getRequestURI() + "\",\"received\":" + body.length
                     + ",\"sum\":" + java.util.Arrays.hashCode(body) + "}");
-        } else if (path.equals("/api/missing")) {
+        } else if (path.equals("/api/missing") || path.startsWith("/api/sessions/gone")) {
             respond(exchange, 404, "application/json", "{\"error\":\"No such session\"}");
+        } else if (exchange.getRequestMethod().equals("GET") && path.equals("/api/sessions/with-secrets")) {
+            respond(exchange, 200, "application/json", "{\"id\":\"with-secrets\",\"secrets\":[\"GH_TOKEN\",\"NOT_SET_HERE\"]}");
+        } else if (exchange.getRequestMethod().equals("GET") && path.equals("/api/sessions/only-missing")) {
+            respond(exchange, 200, "application/json", "{\"id\":\"only-missing\",\"secrets\":[\"NOT_SET_HERE\"]}");
+        } else if (exchange.getRequestMethod().equals("GET") && path.equals("/api/sessions/no-secrets")) {
+            respond(exchange, 200, "application/json", "{\"id\":\"no-secrets\",\"secrets\":[]}");
         } else {
             respond(exchange, 200, "application/json", "{\"method\":\"" + exchange.getRequestMethod() + "\",\"uri\":\""
                     + exchange.getRequestURI() + "\",\"contentType\":\""
@@ -323,9 +329,53 @@ class UiProxyTest {
                 .doesNotContain("secret-gh-token");
             // a role without secrets does not need the file
             assertThat(post("/api/sessions", "{\"role\":\"qa-tester\"}").statusCode()).isEqualTo(200);
+            // nor are a session's secrets refreshed from such a file
+            HttpResponse<String> refresh = put("/api/sessions/with-secrets/secrets", "");
+            assertThat(refresh.statusCode()).isEqualTo(500);
+            assertThat(refresh.body()).contains("chmod 600").doesNotContain("\"method\"")
+                .doesNotContain("secret-gh-token");
         } finally {
             Files.setPosixFilePermissions(secretsFile, PosixFilePermissions.fromString("rw-------"));
         }
+    }
+
+    @Test
+    void refreshesASessionsSecretsFromTheSecretsFile() throws Exception {
+        // the page sends nothing: the names are the session's, the values the file's
+        HttpResponse<String> refreshed = put("/api/sessions/with-secrets/secrets", "");
+        assertThat(refreshed.statusCode()).as(refreshed.body()).isEqualTo(200);
+        assertThat(refreshed.body()).contains("\"method\":\"PUT\"")
+            .contains("\"uri\":\"/api/sessions/with-secrets/secrets\"")
+            .contains("\"contentType\":\"application/json\"")
+            .contains("\"body\":{\"secrets\":{\"GH_TOKEN\":\"secret-gh-token\"}}")
+            .as("only the session's secrets").doesNotContain("not-for-this-role");
+        assertThat(refreshed.headers().firstValue(ProxyController.MISSING_SECRETS_HEADER)).hasValue("NOT_SET_HERE");
+
+        // on a named server too
+        HttpResponse<String> routed = put("/api/servers/localhost/sessions/with-secrets/secrets", "{}");
+        assertThat(routed.body()).contains("\"uri\":\"/api/sessions/with-secrets/secrets\"")
+            .contains("secret-gh-token");
+
+        // the page cannot send values, or pick the names
+        for (String body : new String[] {"{\"secrets\":{\"GH_TOKEN\":\"x\"}}", "{\"secrets\":{}}", "{\"names\":[\"UNUSED\"]}",
+                "[]", "not json"}) {
+            HttpResponse<String> refused = put("/api/sessions/with-secrets/secrets", body);
+            assertThat(refused.statusCode()).as(body).isEqualTo(400);
+            assertThat(refused.body()).as(body).doesNotContain("\"method\"").doesNotContain("secret-gh-token");
+        }
+
+        // nothing to send: said here, the server is not asked to replace anything
+        HttpResponse<String> none = put("/api/sessions/no-secrets/secrets", "");
+        assertThat(none.statusCode()).isEqualTo(400);
+        assertThat(none.body()).contains("created without secrets").doesNotContain("\"method\"");
+        HttpResponse<String> missing = put("/api/sessions/only-missing/secrets", "");
+        assertThat(missing.statusCode()).isEqualTo(400);
+        assertThat(missing.body()).contains("NOT_SET_HERE").doesNotContain("\"method\"");
+
+        // a session the user may not use is as the server says
+        HttpResponse<String> gone = put("/api/sessions/gone/secrets", "");
+        assertThat(gone.statusCode()).isEqualTo(404);
+        assertThat(gone.body()).contains("No such session");
     }
 
     @Test
@@ -373,6 +423,16 @@ class UiProxyTest {
         assertThat(browser.send(HttpRequest.newBuilder(uri("/api/sessions/abc/files?path=x"))
             .PUT(HttpRequest.BodyPublishers.ofByteArray(new byte[1]))
             .build(), HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(403);
+    }
+
+    private HttpResponse<String> put(String path, String body) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(uri(path)).header("X-BobCrew", "1");
+        if (body.isEmpty()) {
+            request.PUT(HttpRequest.BodyPublishers.noBody());
+        } else {
+            request.header("Content-Type", "application/json").PUT(HttpRequest.BodyPublishers.ofString(body));
+        }
+        return browser.send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> post(String path, String body) throws Exception {

@@ -80,8 +80,8 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager` with the request's `Caller`. |
 | `Caller`, `CallerFactory`, `CallerAuthentication`, `CallerArgumentResolver` | Who makes a request and what they may do: name, admin, allowed capabilities, limits. `CallerFactory` makes it from a checked token: from `issue-token`'s as before Keycloak, from Keycloak's by roles and limit claims (bounded by the server's settings and ceilings). |
 | `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limits (in all and per user), the image allowlist, idle cleanup, shutdown, and the checks on client-supplied environment variables, secrets and user profile files (`checkUserProfile`). |
-| `AgentSession` | One agent container and its ACP session: start (with the repository clone, then user profile files and secrets written before the agent runs), prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
-| `DockerRuntime` | The only class that talks to Docker: creates the sessions' network (inter-container traffic off) and containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, writes user profile files and secrets, removes; removes this instance's leftover containers at startup and shutdown. |
+| `AgentSession` | One agent container and its ACP session: start (with the repository clone, then user profile files and secrets written before the agent runs), secrets refresh, prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
+| `DockerRuntime` | The only class that talks to Docker: creates the sessions' network (inter-container traffic off) and containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, writes user profile files and secrets (again on a refresh, then `applyProfile` runs the image's `profile.d` once more), removes; removes this instance's leftover containers at startup and shutdown. |
 | `AllowedImages` | Which images a client may name (`bobcrew.docker.allowed-images` globs, plus the default image). |
 | `Capabilities`, `Resources` | What a session may run besides commands (`docker`, `libvirt`), checked against `bobcrew.allowed-capabilities`; and its memory and CPU limits, checked against the server's caps. |
 | `GitRepository` | A repository to clone into a new session: checks the URL (allowed schemes, no credentials) and branch, and names the clone's directory. |
@@ -99,7 +99,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 
 | Class | Role |
 |---|---|
-| `ProxyController` | Forwards `/api/**` to the server with the server's token, or the user's login (`OidcLogin.currentToken()`; 401 `{"login": "/login"}` without one); streams responses through, and upload request bodies too (other bodies are read whole, up to 2 MB). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`), `userProfile` (from `UserProfileStore`) and `repository` out; refuses `image`/`env`/`secrets`/`repository` sent by the browser. |
+| `ProxyController` | Forwards `/api/**` to the server with the server's token, or the user's login (`OidcLogin.currentToken()`; 401 `{"login": "/login"}` without one); streams responses through, and upload request bodies too (other bodies are read whole, up to 2 MB). Rewrites a secrets refresh (`PUT .../sessions/{id}/secrets`: nothing in, the secrets file's values for the session's secret names out). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`), `userProfile` (from `UserProfileStore`) and `repository` out; refuses `image`/`env`/`secrets`/`repository` sent by the browser. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
 | `ServerConnection` | Server URL, token (none when the login provides it), and the HTTP client with the trusted CA. |
 | `OidcLogin`, `LoginController` | The user's Keycloak login: authorization code with PKCE as a public client, `state` once and for 10 minutes, tokens in memory only, refreshed 30 s before expiry; `/login`, `/login/callback`, `/logout`, `/api/login`. |
@@ -151,6 +151,13 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
   the container runs, so `ContainerAcpTransport.connect` calls its `afterStart` hook (which writes them) right after
   starting the container, before the SDK sends `initialize`. Writing them later, after `initialize`, would wait
   forever for an agent that waits for them.
+- **Secrets can be written again on a running session** (`AgentSession.refreshSecrets`, for tokens that expire).
+  The agent is then the same user with write access to the secrets' directory, so `DockerRuntime.writeSecrets`
+  must not trust what is there: a `mktemp` name, `mv -T` over the target, never a fixed temporary name or a
+  redirection onto the target. Which secrets a session has never changes (`secretNames` feeds its details and the
+  first prompt's note): a refresh replaces values only. What an image copies out of the secrets at start
+  (bob-base's git identity) needs `DockerRuntime.applyProfile` to follow; reading the file at each use, as
+  `gh` and `git-credential-bobcrew` do, needs nothing.
 - **The entrypoint keeps stdout clean**: anything an image prints to stdout before or besides the agent
   becomes an unreadable ACP line. `bobcrew-entrypoint.sh` sends all its output to stderr; images built
   on bob-base must do the same in their `profile.d` snippets.
@@ -195,7 +202,9 @@ the maintainer.
   `/run/bobcrew/secrets` (mode 700, files 400, the session's user) through an exec's standard input, never a
   command line, and `AgentSession` drops the values once written. Images read them from there when needed
   (bob-base's `gh` wrapper and `git-credential-bobcrew`); do not export them in a `profile.d` snippet. The UI
-  takes their values from `~/.bobcrew/secrets.json` only, never from its own environment.
+  takes their values from `~/.bobcrew/secrets.json` only, never from its own environment. Replacing them in a
+  running session follows the same rules, and is the owner's or an admin's alone: the session then acts with
+  the caller's credentials. The page sends no values for it either.
 - The JWT secret and tokens are never logged. The UI's tokens (configured, or the user's Keycloak access, refresh
   and id tokens) must never be sent to the browser, and live in the UI's memory only.
 - A token's issuer picks how it is checked; never let a token of one issuer be checked with the other's key

@@ -93,6 +93,12 @@ function workspaceEventText(event) {
   return '';
 }
 
+// The one-line description of a secrets_refreshed event: who replaced which of the session's secrets (names only).
+function secretsRefreshedText(event) {
+  const names = (event.data && Array.isArray(event.data.names)) ? event.data.names : [];
+  return `${event.user || 'someone'} refreshed the session's secrets` + (names.length ? `: ${names.join(', ')}` : '');
+}
+
 // The marker for a turn_end event, shown for every turn, so that anything the agent sends later is visibly
 // outside the turn; the page uses it too.
 function turnEndText(stopReason) {
@@ -200,6 +206,9 @@ function transcriptItems(events) {
       case 'file_uploaded':
       case 'repository_cloned':
         items.push({ type: 'divider', text: workspaceEventText(event) });
+        break;
+      case 'secrets_refreshed':
+        items.push({ type: 'divider', text: secretsRefreshedText(event) });
         break;
       case 'shared':
         items.push({ type: 'divider', text: sharedEventText(event) });

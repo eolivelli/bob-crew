@@ -573,15 +573,26 @@ class DockerRuntime implements Closeable {
      * readable only by the session's user, then {@link #SECRETS_READY}, which the entrypoint waits for before it
      * sets anything up or starts the agent. Each file goes through a temporary name, so a file is never seen
      * half-written. The values reach the container on an exec's standard input, never on a command line.
+     *
+     * <p>It also runs on a session whose agent is already at work, to replace secrets
+     * ({@link AgentSession#refreshSecrets}). The agent is the same user and can write in that directory, so the
+     * temporary name is a fresh one from {@code mktemp}, not one the agent could have put a link at, and the
+     * rename replaces whatever is at the target instead of following it ({@code mv -T}: a link there is
+     * replaced, a directory makes it fail). That keeps a new value out of places the agent prepared; it does
+     * not keep it from the agent, which reads these files anyway.
      * @param secrets names already checked (they are file names here), values as given
      * @throws ApiException 500 if a file cannot be written; the values are never part of the message or the log
      */
     void writeSecrets(String containerId, Map<String, String> secrets, Duration timeout) {
         String script = """
                 umask 077
-                head -c "$2" > "$1.tmp" || exit 5
-                [ "$(wc -c < "$1.tmp")" -eq "$2" ] || exit 6
-                chmod 400 "$1.tmp" && mv -f -- "$1.tmp" "$1" || exit 7
+                tmp=$(mktemp "$1.XXXXXX") || exit 5
+                head -c "$2" > "$tmp" || { rm -f -- "$tmp"; exit 5; }
+                if [ "$(wc -c < "$tmp")" -ne "$2" ]; then
+                    rm -f -- "$tmp"
+                    exit 6
+                fi
+                chmod 400 "$tmp" && mv -fT -- "$tmp" "$1" || { rm -f -- "$tmp"; exit 7; }
                 """;
         for (Map.Entry<String, String> secret : secrets.entrySet()) {
             byte[] value = secret.getValue().getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -601,6 +612,30 @@ class DockerRuntime implements Closeable {
             log.warn("Marking the secrets of container {} ready exited with {}: {}", shortId(containerId),
                     ready.exitCode(), ready.output().strip());
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "The session's secrets could not be set up");
+        }
+    }
+
+    /**
+     * Runs the image's {@code profile.d} setup again, as the session's user: what an image derives from the
+     * secrets when the container starts (bob-base sets git's {@code user.name} and {@code user.email} from
+     * {@code GIT_USER_NAME} and {@code GIT_USER_EMAIL}) would otherwise keep the values of before a refresh.
+     * It runs the entrypoint with a command that does nothing, as {@link #cloneRepository} runs it with git; an
+     * image without an entrypoint has no such setup, and nothing is run.
+     * @throws ApiException 500 if the setup fails
+     */
+    void applyProfile(String containerId, Duration timeout) {
+        String[] entrypoint = client.inspectContainerCmd(containerId).exec().getConfig().getEntrypoint();
+        if (entrypoint == null || entrypoint.length == 0) {
+            return;
+        }
+        List<String> command = new ArrayList<>(List.of(entrypoint));
+        command.add("true");
+        ExecResult result = exec(containerId, timeout, settings.user(), null, List.of(), command);
+        if (result.exitCode() != 0) {
+            log.warn("Running the setup of container {} again exited with {}: {}", shortId(containerId),
+                    result.exitCode(), result.output().strip());
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "The secrets were replaced, but the session's setup could not be run again with them");
         }
     }
 

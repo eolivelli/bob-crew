@@ -282,6 +282,8 @@ function setStatus(status) {
   $('metrics-toggle').disabled = status === 'CLOSED';
   $('upload').disabled = !open || state.uploading;
   $('session-mode').disabled = !open;
+  const session = currentSession();
+  $('refresh-secrets').disabled = !open || !(session && session.secrets && session.secrets.length);
 }
 
 // ---- one session --------------------------------------------------------
@@ -386,6 +388,9 @@ function render(event) {
     case 'file_uploaded':
     case 'repository_cloned':
       add(el('div', 'divider', workspaceEventText(event)));
+      break;
+    case 'secrets_refreshed':
+      add(el('div', 'divider', secretsRefreshedText(event)));
       break;
     case 'shared':
       add(el('div', 'divider', sharedEventText(event)));
@@ -814,6 +819,64 @@ $('share').addEventListener('click', async () => {
   } catch (e) {
     notify(e.message);
   }
+});
+
+// ---- refreshing secrets ----------------------------------------------------
+// For credentials that expire (a GitHub token): the UI app sends the values its secrets file has now for the
+// secrets a session was created with. No value comes through this page; only the owner (or an admin) may.
+
+function sessionPath(session, subPath) {
+  const base = session.server ? `/servers/${encodeURIComponent(session.server)}` : '';
+  return `${base}/sessions/${encodeURIComponent(session.id)}${subPath || ''}`;
+}
+
+// Returns the names the secrets file does not have (they stay as they were in the session).
+async function refreshSecretsOf(session) {
+  const response = await call('PUT', sessionPath(session, '/secrets'));
+  const missing = response.headers.get('X-BobCrew-Missing-Secrets');
+  return missing ? missing.split(',') : [];
+}
+
+$('refresh-secrets').addEventListener('click', async () => {
+  const session = currentSession();
+  if (!session) return;
+  const button = $('refresh-secrets');
+  button.disabled = true;
+  try {
+    const missing = await refreshSecretsOf(session);
+    if (missing.length) {
+      notify(`Refreshed, except these, which are not in ~/.bobcrew/secrets.json and stay as they were: ${missing.join(', ')}`);
+    }
+  } catch (e) {
+    notify(e.message);
+  } finally {
+    setStatus(state.status);
+  }
+});
+
+$('refresh-all-secrets').addEventListener('click', async () => {
+  await refreshSessions();
+  const mine = state.sessions.filter((session) => session.owner === state.user
+    && (session.status === 'IDLE' || session.status === 'RUNNING') && session.secrets && session.secrets.length);
+  if (!mine.length) {
+    notify('You have no open session with secrets.');
+    return;
+  }
+  const button = $('refresh-all-secrets');
+  button.disabled = true;
+  const failed = [];
+  const missing = new Set();
+  for (const session of mine) {
+    try {
+      (await refreshSecretsOf(session)).forEach((name) => missing.add(name));
+    } catch (e) {
+      failed.push(`${session.title || session.id}: ${e.message}`);
+    }
+  }
+  button.disabled = false;
+  notify(`Refreshed the secrets of ${mine.length - failed.length} of your ${mine.length} open sessions.`
+    + (missing.size ? ` Not in ~/.bobcrew/secrets.json, left as they were: ${[...missing].join(', ')}.` : '')
+    + (failed.length ? ` Failed: ${failed.join('; ')}` : ''));
 });
 
 $('close').addEventListener('click', async () => {

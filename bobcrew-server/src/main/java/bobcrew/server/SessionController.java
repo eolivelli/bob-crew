@@ -63,6 +63,15 @@ class SessionController {
     record ShareRequest(List<String> users) {
     }
 
+    /** New values for secrets a session has; as in {@link CreateRequest}, the values are never logged. */
+    record SecretsRequest(Map<String, String> secrets) {
+
+        @Override
+        public String toString() {
+            return "SecretsRequest[secrets=" + (secrets == null ? "{}" : secrets.keySet()) + "]";
+        }
+    }
+
     record ClearRequest(Boolean wipeWorkspace) {
     }
 
@@ -185,6 +194,15 @@ class SessionController {
     @PutMapping("/sessions/{id}/sharing")
     AgentSession.Info share(@PathVariable String id, @RequestBody ShareRequest request, Caller caller) {
         return sessions.share(caller, id, request.users());
+    }
+
+    /**
+     * Replaces the values of secrets the session was created with (an expired token, say), in the running
+     * container. Only the owner or an admin may.
+     */
+    @PutMapping("/sessions/{id}/secrets")
+    AgentSession.Info refreshSecrets(@PathVariable String id, @RequestBody SecretsRequest request, Caller caller) {
+        return sessions.refreshSecrets(caller, id, request.secrets());
     }
 
     @DeleteMapping("/sessions/{id}")

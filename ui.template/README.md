@@ -43,6 +43,10 @@ is left out, and the page says so. Nothing comes from the UI's own environment. 
 session (you, the users you share it with, admins) can ask its agent for these values, so use tokens with
 the narrowest scope that does the job.
 
+Use an expiring fine-grained token for `GH_TOKEN`. When it is about to expire, make a new one on GitHub, put
+it in `secrets.json`, and click **Refresh secrets in my sessions** in the sidebar (or **Refresh secrets** in
+one session): the running sessions get the new value without being restarted.
+
 Its prompt asks the agent to work per ticket, on a branch, with unit tests for every change, a full
 build before committing, a **review of each patch by a subagent** before committing, the ticket id in
 every commit message, and pushes or pull requests only after you confirm.

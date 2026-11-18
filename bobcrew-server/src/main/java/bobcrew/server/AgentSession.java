@@ -122,6 +122,9 @@ final class AgentSession {
     /** The user profile files until they are written into the container, then null. */
     private volatile List<ProfileFile> pendingUserProfile;
 
+    /** Held while secrets are replaced in the running container, so that refreshes do not interleave. */
+    private final java.util.concurrent.locks.ReentrantLock secretsRefresh = new java.util.concurrent.locks.ReentrantLock();
+
     /** Why writing the secrets failed, if it did: reported as is rather than as a failure of the agent. */
     private volatile ApiException secretsFailure;
 
@@ -169,6 +172,43 @@ final class AgentSession {
         sharedWith = Set.copyOf(users);
         updatedAt = Instant.now();
         events.append(UiEvent.SHARED, by, Map.of("users", users.stream().sorted().toList()));
+    }
+
+    /**
+     * Replaces the values of some of the session's secrets in the running container, for credentials that expire
+     * (a GitHub token): the files change, the image's setup runs again with them, and a
+     * {@link UiEvent#SECRETS_REFRESHED} event records who did it and which names, never the values. Only secrets
+     * the session was created with can be replaced: which secrets a session has is fixed, so that its details
+     * and what the agent was told stay true. Who may do this is {@link SessionAccessPolicy}'s decision, made
+     * before. The values are not kept.
+     * @param secrets already checked names and values
+     * @throws ApiException 400 for no secrets or one the session does not have, 409 if the session is not open
+     */
+    void refreshSecrets(String by, Map<String, String> secrets) {
+        requireOpen();
+        if (secrets.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "secrets is required: the secrets to replace");
+        }
+        List<String> names = secrets.keySet().stream().sorted().toList();
+        List<String> unknown = names.stream().filter(name -> !secretNames.contains(name)).toList();
+        if (!unknown.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "The session was not created with "
+                    + String.join(", ", unknown) + ": its secrets can be replaced, not added to (it has "
+                    + (secretNames.isEmpty() ? "none" : String.join(", ", secretNames)) + ")");
+        }
+        // one at a time: two refreshes interleaved could leave values of both. A lock, not synchronized: the
+        // writes block on Docker, and that would pin the virtual thread
+        secretsRefresh.lock();
+        try {
+            requireOpen();
+            docker.writeSecrets(containerId, secrets, properties.requestTimeout());
+            touch();
+            events.append(UiEvent.SECRETS_REFRESHED, by, Map.of("names", names));
+            log.info("Session {}: {} refreshed the secrets {}", id, by, names);
+            docker.applyProfile(containerId, properties.requestTimeout());
+        } finally {
+            secretsRefresh.unlock();
+        }
     }
 
     Status status() {

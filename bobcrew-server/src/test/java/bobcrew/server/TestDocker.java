@@ -93,6 +93,8 @@ final class TestDocker implements ExecutionCondition {
                 context.resolve("bobcrew-entrypoint.sh"));
         Files.copy(module.resolveSibling("docker").resolve("bob-base/bin/git-credential-bobcrew"),
                 context.resolve("git-credential-bobcrew"));
+        Files.copy(module.resolveSibling("docker").resolve("bob-base/profile.d/40-git.sh"),
+                context.resolve("40-git.sh"));
         Files.copy(fakeAgentJar(), context.resolve("fake-agent.jar"), StandardCopyOption.REPLACE_EXISTING);
         File dir = context.toFile();
         docker.buildImageCmd(dir)

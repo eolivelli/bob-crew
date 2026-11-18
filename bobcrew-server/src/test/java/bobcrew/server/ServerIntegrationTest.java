@@ -467,6 +467,77 @@ class ServerIntegrationTest {
     }
 
     @Test
+    void theOwnerReplacesTheSecretsOfARunningSession() throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("secrets", Map.of("GH_TOKEN", "old-token", "GIT_USER_NAME", "Ada"));
+        JsonNode session = create(body);
+        String id = session.get("id").asString();
+        String container = session.get("containerId").asString();
+        String gitName = "git config --file /home/bob/.gitconfig user.name";
+        assertThat(execOutput(container, "sh", "-c", gitName).strip()).isEqualTo("Ada");
+        // the agent is the same user: it can put a link where a write used to go through
+        execOutput(container, "ln", "-s", "/opt/workspace/leak", "/run/bobcrew/secrets/GH_TOKEN.tmp");
+
+        String secrets = "/sessions/" + id + "/secrets";
+        HttpResponse<String> response = send("PUT", secrets,
+                "{\"secrets\":{\"GH_TOKEN\":\"new-token\",\"GIT_USER_NAME\":\"Grace\"}}", alice);
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+        assertThat(response.body()).as("values are not echoed").doesNotContain("new-token").doesNotContain("Grace");
+        assertThat(JSON.readTree(response.body()).get("secrets").toString())
+            .isEqualTo("[\"GH_TOKEN\",\"GIT_USER_NAME\"]");
+
+        assertThat(execOutput(container, "cat", "/run/bobcrew/secrets/GH_TOKEN")).isEqualTo("new-token");
+        assertThat(execOutput(container, "stat", "-c", "%a %u %F", "/run/bobcrew/secrets/GH_TOKEN"))
+            .isEqualTo("400 1000 regular file\n");
+        assertThat(execOutput(container, "git-credential-bobcrew", "get"))
+            .as("git uses the new token at once").isEqualTo("username=x-access-token\npassword=new-token\n");
+        assertThat(execOutput(container, "sh", "-c", gitName).strip())
+            .as("the image's setup ran again with the new values").isEqualTo("Grace");
+        assertThat(exists(container, "/opt/workspace/leak")).as("nothing went through the agent's link").isFalse();
+        assertThat(execOutput(container, "ls", "-A", "/run/bobcrew/secrets").lines().sorted().toList())
+            .as("no temporary file is left").containsExactly(".ready", "GH_TOKEN", "GH_TOKEN.tmp", "GIT_USER_NAME");
+
+        List<JsonNode> events = events(id, 0, event -> event.get("type").asString().equals("secrets_refreshed"));
+        JsonNode refreshed = first(events, "secrets_refreshed");
+        assertThat(refreshed.get("user").asString()).isEqualTo("alice");
+        assertThat(refreshed.get("data").get("names").toString()).isEqualTo("[\"GH_TOKEN\",\"GIT_USER_NAME\"]");
+        assertThat(events.toString()).doesNotContain("new-token").doesNotContain("Grace");
+
+        // one secret alone, and a link the agent left at the target: replaced, not followed
+        execOutput(container, "sh", "-c", "cd /run/bobcrew/secrets && rm -f GH_TOKEN && ln -s /opt/workspace/leak GH_TOKEN");
+        assertThat(send("PUT", secrets, "{\"secrets\":{\"GH_TOKEN\":\"third-token\"}}", alice).statusCode())
+            .isEqualTo(200);
+        assertThat(execOutput(container, "stat", "-c", "%F", "/run/bobcrew/secrets/GH_TOKEN"))
+            .isEqualTo("regular file\n");
+        assertThat(execOutput(container, "cat", "/run/bobcrew/secrets/GH_TOKEN")).isEqualTo("third-token");
+        assertThat(exists(container, "/opt/workspace/leak")).isFalse();
+        assertThat(execOutput(container, "sh", "-c", gitName).strip()).as("the others stay").isEqualTo("Grace");
+
+        // only the secrets the session has, and only well-formed ones
+        response = send("PUT", secrets, "{\"secrets\":{\"GH_TOKEN\":\"x\",\"JIRA_TOKEN\":\"y\"}}", alice);
+        assertThat(response.statusCode()).isEqualTo(400);
+        assertThat(response.body()).contains("not created with JIRA_TOKEN").doesNotContain("\"y\"");
+        assertThat(execOutput(container, "cat", "/run/bobcrew/secrets/GH_TOKEN")).as("nothing changed")
+            .isEqualTo("third-token");
+        assertThat(send("PUT", secrets, "{}", alice).statusCode()).isEqualTo(400);
+        assertThat(send("PUT", secrets, "{\"secrets\":{}}", alice).statusCode()).isEqualTo(400);
+        assertThat(send("PUT", secrets, "{\"secrets\":{\"../x\":\"y\"}}", alice).statusCode()).isEqualTo(400);
+
+        // the owner or an admin, nobody else: the session then acts with the caller's credentials
+        String carol = token("carol");
+        share(id, alice, "carol");
+        response = send("PUT", secrets, "{\"secrets\":{\"GH_TOKEN\":\"carols\"}}", carol);
+        assertThat(response.statusCode()).isEqualTo(403);
+        assertThat(response.body()).contains("Only the session's owner can refresh its secrets");
+        assertThat(send("PUT", secrets, "{\"secrets\":{\"GH_TOKEN\":\"x\"}}", token("mallory")).statusCode())
+            .isEqualTo(404);
+        assertThat(execOutput(container, "cat", "/run/bobcrew/secrets/GH_TOKEN")).isEqualTo("third-token");
+        assertThat(send("PUT", secrets, "{\"secrets\":{\"GH_TOKEN\":\"admins\"}}", admin).statusCode())
+            .isEqualTo(200);
+        assertThat(execOutput(container, "cat", "/run/bobcrew/secrets/GH_TOKEN")).isEqualTo("admins");
+    }
+
+    @Test
     void writesUserProfileFilesIntoHomeDirectory() throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         String settingsXml = "<settings><servers><server><id>central</id></server></servers></settings>";
