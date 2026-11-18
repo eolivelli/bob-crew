@@ -163,6 +163,14 @@ main.showing-roles > :not(#roles-view):not(#notice) { display: none; }
 .msg .who { display: block; font-size: 11px; color: var(--muted); font-style: normal; }
 .msg a, .card a { color: var(--accent); }
 
+/* a message or card with its copy button beside it; the button shows when the pointer or the focus is there */
+.box { display: flex; align-items: flex-start; gap: 6px; align-self: flex-start; max-width: min(820px, 92%); }
+.box.user { align-self: flex-end; flex-direction: row-reverse; }
+.box > .msg, .box > .card { max-width: none; min-width: 0; }
+.box > .copy { flex: none; padding: 2px 7px; font-size: 11px; color: var(--muted); opacity: 0; }
+.box:hover > .copy, .box > .copy:focus-visible { opacity: 1; }
+@media (hover: none) { .box > .copy { opacity: 1; } }
+
 .card { align-self: flex-start; max-width: min(820px, 92%); border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 8px 12px; font-size: 14px; }
 .card .head { display: flex; gap: 8px; align-items: center; }
 .card .title { font-weight: 600; overflow-wrap: anywhere; }

@@ -70,6 +70,12 @@ assert(workspace.includes('repository https://github.com/a/&lt;b&gt; (main)'));
 assert(workspace.includes('capabilities docker, &lt;x&gt;'), 'capabilities are shown, escaped');
 assert(!html.includes('capabilities'));
 
+// what a copy button puts on the clipboard for a box of several parts
+assert.strictEqual(ctx.joinParts(['Run tests', null, '', '  \n', 'mvn test\n', undefined, 'BUILD SUCCESS\n\n']),
+  'Run tests\n\nmvn test\n\nBUILD SUCCESS');
+assert.strictEqual(ctx.joinParts(['  indented stays', 0]), '  indented stays\n\n0');
+assert.strictEqual(ctx.joinParts([]), '');
+
 ctx.gzipText(html).then(async (blob) => {
   const back = zlib.gunzipSync(Buffer.from(await blob.arrayBuffer())).toString('utf8');
   assert.strictEqual(back, html);

@@ -336,6 +336,38 @@ function linked(tag, className, text) {
   return node;
 }
 
+// A box of the transcript with a button beside it that copies its text to the clipboard. The text is asked for
+// when the button is clicked, since boxes go on changing (a message streams in, a tool call gets its output).
+// `side` is 'user' for boxes on the right, whose button goes on their left.
+function withCopy(box, text, side) {
+  const row = el('div', 'box' + (side ? ' ' + side : ''));
+  const button = el('button', 'copy', 'Copy');
+  button.type = 'button';
+  button.title = 'Copy this text to the clipboard';
+  button.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(text());
+      button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = 'Copy'; }, 1500);
+    } catch (e) {
+      notify('The browser did not allow copying to the clipboard');
+    }
+  });
+  row.append(box, button);
+  return row;
+}
+
+// A message with its copy button; returns the message, which is what streaming goes on filling.
+function addMessage(message) {
+  add(withCopy(message, () => message.textContent, message.classList.contains('user') ? 'user' : ''));
+  return message;
+}
+
+// What a card says, part by part: its title, then each block of text in it.
+function cardText(card) {
+  return joinParts([...card.querySelectorAll('.title, pre:not([hidden]), li')].map((part) => part.textContent));
+}
+
 // ---- rendering events into the transcript ------------------------------
 
 function render(event) {
@@ -347,7 +379,7 @@ function render(event) {
       state.inTurn = true;
       state.workAfterTurn = false;
       updateCancel();
-      add(linked('div', 'msg user', data.text || ''));
+      addMessage(linked('div', 'msg user', data.text || ''));
       break;
     case 'update':
       if (!state.inTurn && !state.workAfterTurn && WORK_UPDATES.has(data.sessionUpdate)) {
@@ -382,7 +414,7 @@ function render(event) {
       break;
     case 'error':
       state.streaming = null;
-      add(linked('div', 'msg error', data.message || 'Error'));
+      addMessage(linked('div', 'msg error', data.message || 'Error'));
       break;
     case 'file_uploaded':
     case 'repository_cloned':
@@ -427,7 +459,10 @@ function renderUpdate(data) {
       break;
     default:
       // unknown kinds: pass through visibly rather than dropping them
-      add(el('pre', 'card unknown', JSON.stringify(data, null, 2)));
+      {
+        const unknown = el('pre', 'card unknown', JSON.stringify(data, null, 2));
+        add(withCopy(unknown, () => unknown.textContent));
+      }
       break;
   }
 }
@@ -435,8 +470,7 @@ function renderUpdate(data) {
 function renderChunk(kind, text) {
   let streaming = state.streaming;
   if (!streaming || streaming.kind !== kind) {
-    const message = el('div', 'msg ' + kind);
-    add(message);
+    const message = addMessage(el('div', 'msg ' + kind));
     streaming = { kind, body: message, text: '' };
     state.streaming = streaming;
   }
@@ -461,7 +495,7 @@ function renderToolCall(call) {
   const output = el('pre', 'output');
   output.hidden = true;
   card.append(output);
-  add(card);
+  add(withCopy(card, () => cardText(card)));
   state.toolCalls.set(call.toolCallId, { card, head, output });
 }
 
@@ -486,7 +520,7 @@ function renderPlan(entries) {
   if (!card) {
     card = el('div', 'card plan');
     card.append(el('div', 'title', 'Plan'), el('ol'));
-    add(card);
+    add(withCopy(card, () => cardText(card)));
     state.plan = card;
   }
   const list = card.querySelector('ol');

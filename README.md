@@ -394,6 +394,10 @@ the session with.
 
 ## Exporting a session
 
+Each message, tool call and plan in a session has a **Copy** button beside it (it shows when the pointer is on
+the box), which puts the box's plain text on the clipboard: a message as it was written, a tool call as its
+title, input and output.
+
 The **Export transcript** button in a session's header downloads the whole session as one
 standalone HTML page, gzipped (`<title>-<date>.html.gz`; `gunzip` it, then open it). It is built in
 the browser from the events the page has received, so it contains what the server still holds: the

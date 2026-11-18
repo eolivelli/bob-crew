@@ -24,6 +24,15 @@ function toolOutput(update) {
   }).join('\n');
 }
 
+// The text of a box made of several parts (a tool call's title, input and output; a plan's entries), as the
+// page's copy buttons put it on the clipboard: the parts that have text, a blank line between them.
+function joinParts(parts) {
+  return parts
+    .filter((part) => part !== null && part !== undefined && String(part).trim() !== '')
+    .map((part) => String(part).replace(/\s+$/, ''))
+    .join('\n\n');
+}
+
 function esc(value) {
   return String(value === undefined || value === null ? '' : value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
