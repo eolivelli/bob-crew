@@ -45,7 +45,8 @@ bobcrew:
     # The command run in each session's container (the image's entrypoint runs it). It must speak
     # ACP on stdin/stdout. --auto-approve is deliberately absent: users answer permission requests.
     command: ${BOBCREW_AGENT_COMMAND:bob,acp,--trust,--accept-license,--disable-mcp,--disable-subagents}
-    # Passed to the container as BOB_API_KEY and BOBSHELL_API_KEY; never logged
+    # Passed to the container as BOB_API_KEY and BOBSHELL_API_KEY, for sessions created without a key of their
+    # own (apiKey in the request, from the UI's secrets file); never logged
     api-key: ${BOB_API_KEY:}
   docker:
     # The Docker daemon; the server's user must be allowed to use it

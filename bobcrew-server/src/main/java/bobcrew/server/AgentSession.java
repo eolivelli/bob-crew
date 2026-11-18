@@ -49,7 +49,7 @@ final class AgentSession {
 
     /** What clients see of a session. */
     record Info(String id, String owner, List<String> sharedWith, String title, String image, String containerId,
-            List<String> secrets, GitRepository repository,
+            List<String> secrets, boolean ownApiKey, GitRepository repository,
             List<String> capabilities, Resources resources, Status status, String agent, String currentMode, List<Mode> modes, Instant createdAt, Instant updatedAt,
             long lastSeq) {
     }
@@ -119,6 +119,15 @@ final class AgentSession {
     /** The secrets' values until they are written into the container, then null: the server keeps no copy. */
     private volatile Map<String, String> pendingSecrets;
 
+    /**
+     * The session's own Bob API key until its container is created with it, then null; null too when the session
+     * uses the server's key.
+     */
+    private volatile String pendingApiKey;
+
+    /** Whether the agent runs with a key given for this session rather than the server's. */
+    private final boolean ownApiKey;
+
     /** The user profile files until they are written into the container, then null. */
     private volatile List<ProfileFile> pendingUserProfile;
 
@@ -135,9 +144,13 @@ final class AgentSession {
      * @param repository cloned into the workspace when the session starts, or null
      * @param secrets written as files into the container when it starts (names already checked); kept until then
      * @param userProfile files written into /home/bob in the container before the agent starts
+     * @param apiKey the Bob API key for this session's agent (already checked), or null for the server's
      */
     AgentSession(DockerRuntime.ContainerSpec spec, GitRepository repository, Map<String, String> secrets,
-            List<ProfileFile> userProfile, String title, DockerRuntime docker, BobCrewProperties properties) {
+            List<ProfileFile> userProfile, String title, String apiKey, DockerRuntime docker,
+            BobCrewProperties properties) {
+        this.pendingApiKey = apiKey;
+        this.ownApiKey = apiKey != null;
         this.secretNames = secrets.keySet().stream().sorted().toList();
         this.pendingSecrets = Map.copyOf(secrets);
         this.pendingUserProfile = userProfile == null ? List.of() : List.copyOf(userProfile);
@@ -229,7 +242,7 @@ final class AgentSession {
 
     Info info() {
         return new Info(id, owner, sharedWith.stream().sorted().toList(), title, spec.image(),
-                DockerRuntime.shortId(containerId), secretNames, repository, spec.capabilities(), spec.resources(),
+                DockerRuntime.shortId(containerId), secretNames, ownApiKey, repository, spec.capabilities(), spec.resources(),
                 status,
                 agentName,
                 currentMode, modes, createdAt, updatedAt, events.lastSeq());
@@ -243,7 +256,9 @@ final class AgentSession {
      */
     void start() {
         try {
-            String created = docker.create(spec);
+            String apiKey = pendingApiKey;
+            pendingApiKey = null;
+            String created = docker.create(spec, apiKey);
             this.containerId = created;
             ContainerAcpTransport transport = new ContainerAcpTransport(docker, created,
                     line -> agentStderr.debug("[{}] {}", id, line), reason -> onAgentExit(),

@@ -327,6 +327,7 @@ class UiProxyTest {
     void thePageCannotChooseTheImageOrEnvironmentItself() throws Exception {
         for (String body : new String[] {"{\"image\":\"evil/image\"}", "{\"env\":{\"X\":\"1\"}}",
                 "{\"secrets\":{\"X\":\"1\"}}", "{\"userProfile\":[]}", "{\"role\":\"builder\",\"secrets\":{}}",
+                "{\"apiKey\":\"mine\"}", "{\"role\":\"builder\",\"apiKey\":null}",
                 "{\"role\":\"builder\",\"env\":{}}"}) {
             HttpResponse<String> refused = post("/api/sessions", body);
             assertThat(refused.statusCode()).as(body).isEqualTo(400);
@@ -343,6 +344,37 @@ class UiProxyTest {
     }
 
     @Test
+    void passesTheApiKeyOfTheSecretsFileWithEverySession() throws Exception {
+        String before = Files.readString(secretsFile);
+        Files.writeString(rolesDir.resolve("keyed.md"),
+                "---\nname: Keyed\nsecrets: GH_TOKEN, BOB_API_KEY\n---\nWork.\n");
+        try {
+            Files.writeString(secretsFile, "{\"GH_TOKEN\": \"secret-gh-token\", \"BOB_API_KEY\": \"my-own-bob-key\"}");
+            // whatever the role, and without one: as apiKey, never as one of the secrets
+            HttpResponse<String> created = post("/api/sessions", "{\"title\":\"t\",\"role\":\"builder\"}");
+            assertThat(created.body()).contains("\"body\":{\"title\":\"t\",\"apiKey\":\"my-own-bob-key\","
+                    + "\"image\":\"bobcrew/bob-java:latest\",\"secrets\":{\"GH_TOKEN\":\"secret-gh-token\"}}");
+            assertThat(post("/api/sessions", "{\"role\":\"qa-tester\"}").body())
+                .contains("\"body\":{\"apiKey\":\"my-own-bob-key\"}");
+            assertThat(post("/api/sessions", "").body()).contains("\"body\":{\"apiKey\":\"my-own-bob-key\"}");
+            // a role that lists it gets it the same way, not as a file
+            HttpResponse<String> keyed = post("/api/sessions", "{\"role\":\"keyed\"}");
+            assertThat(keyed.body()).contains("\"body\":{\"apiKey\":\"my-own-bob-key\","
+                    + "\"secrets\":{\"GH_TOKEN\":\"secret-gh-token\"}}");
+            assertThat(keyed.headers().firstValue(ProxyController.MISSING_SECRETS_HEADER)).isEmpty();
+
+            // without it in the file the server's key applies, and a role that lists it is told
+            Files.writeString(secretsFile, before);
+            HttpResponse<String> unkeyed = post("/api/sessions", "{\"role\":\"keyed\"}");
+            assertThat(unkeyed.body()).contains("\"body\":{\"secrets\":{\"GH_TOKEN\":\"secret-gh-token\"}}");
+            assertThat(unkeyed.headers().firstValue(ProxyController.MISSING_SECRETS_HEADER)).hasValue("BOB_API_KEY");
+        } finally {
+            Files.writeString(secretsFile, before);
+            Files.delete(rolesDir.resolve("keyed.md"));
+        }
+    }
+
+    @Test
     void refusesASecretsFileOthersCanRead() throws Exception {
         Files.setPosixFilePermissions(secretsFile, PosixFilePermissions.fromString("rw-r--r--"));
         try {
@@ -350,8 +382,8 @@ class UiProxyTest {
             assertThat(refused.statusCode()).isEqualTo(500);
             assertThat(refused.body()).contains("chmod 600").doesNotContain("\"method\"")
                 .doesNotContain("secret-gh-token");
-            // a role without secrets does not need the file
-            assertThat(post("/api/sessions", "{\"role\":\"qa-tester\"}").statusCode()).isEqualTo(200);
+            // nor for a role without secrets: the file may hold the user's API key, which every session takes
+            assertThat(post("/api/sessions", "{\"role\":\"qa-tester\"}").statusCode()).isEqualTo(500);
             // nor are a session's secrets refreshed from such a file
             HttpResponse<String> refresh = put("/api/sessions/with-secrets/secrets", "");
             assertThat(refresh.statusCode()).isEqualTo(500);

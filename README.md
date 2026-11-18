@@ -132,7 +132,7 @@ java -jar bobcrew-server/target/bobcrew-server-0.1.0-SNAPSHOT.jar issue-token --
 scripts/build-images.sh
 
 # 4. Start the server (reads certs/server.crt and certs/server.key by default)
-export BOB_API_KEY=...            # the key Bob uses, shared by all sessions
+export BOB_API_KEY=...            # the key Bob uses in sessions that bring none of their own (optional)
 java -jar bobcrew-server/target/bobcrew-server-0.1.0-SNAPSHOT.jar
 ```
 
@@ -301,8 +301,8 @@ created with the role, the UI app reads their values from `~/.bobcrew/secrets.js
 `{"GH_TOKEN": "github_pat_...", "JIRA_TOKEN": "..."}`, and passes them to the session, where each becomes a
 file in `/run/bobcrew/secrets` and the first prompt tells the agent which are there. Never the UI's own
 environment: a session gets what you put in that file for sessions, nothing that merely happens to be exported
-in your shell. The file must be readable by you only (`chmod 600`), or the UI refuses to create sessions whose
-role names secrets; it is read for every new session. The values never go through the browser, and a secret
+in your shell. The file must be readable by you only (`chmod 600`), or the UI refuses to create
+sessions (the file may hold your [API key](#api-keys), which every session takes); it is read for every new session. The values never go through the browser, and a secret
 the file does not have is left out (the page says which). The browser cannot choose an image or secrets
 without a role. The rest of the file is the prompt. Files that are not `.md`, are symbolic links, are larger than 64 KiB, have an
 empty prompt, or come after the first 200 are ignored (a warning is logged). The directory is read on every
@@ -341,6 +341,23 @@ When creating a session, the **Role** list next to the title (shown when there a
 one: once the session exists, the UI sends the role's prompt to it as the first prompt, and a blank title becomes
 the role's name. The **ⓘ** button next to the list shows everything the selected role sets, and its manifest.
 The **Roles** button in the sidebar lists the roles and shows each manifest; it is read-only.
+
+## API keys
+
+Bob needs an API key, and a session gets it in one of two ways:
+
+- **The user's own**: put it in `~/.bobcrew/secrets.json` as `BOB_API_KEY`, next to the other secrets:
+  `{"BOB_API_KEY": "...", "GH_TOKEN": "github_pat_..."}`. Every session that UI creates then runs with it,
+  whatever its role (roles need not list it), and the session's header says "own API key". This is the way for
+  a server with several users: each works, and is billed, with their own key, and the server needs none.
+- **The server's**: `BOB_API_KEY` in the server's environment (`server.env` for a remote one), used by the
+  sessions that bring none. Leave it unset to make every user bring their own.
+
+`BOB_API_KEY` is the one name in the secrets file that is not a secret like the others. Secrets become files
+in the container, but Bob reads its key from its environment only, so the UI app sends it apart (`apiKey`) and
+the server sets `BOB_API_KEY` and `BOBSHELL_API_KEY` in that session's container. It is therefore fixed for the
+life of the session: **Refresh secrets** does not change it, and a new key in the file applies to the sessions
+created from then on. Like the secrets, anyone who can use the session can have the agent reveal it.
 
 ## Refreshing secrets (expiring tokens)
 
@@ -479,7 +496,7 @@ Set as environment variables, or as the Spring properties in
 | `BOBCREW_FILE_UPLOADS_ENABLED` | `true` | Whether clients may upload files into a session's workspace |
 | `BOBCREW_MAX_UPLOAD_SIZE` | `100MB` | Largest file a client may upload |
 | `BOBCREW_AGENT_COMMAND` | `bob,acp,--trust,--accept-license,--disable-mcp,--disable-subagents` | The command run in each container, comma separated |
-| `BOB_API_KEY` | none | Passed to the container as `BOB_API_KEY` and `BOBSHELL_API_KEY` |
+| `BOB_API_KEY` | none | The Bob API key of sessions created without one of their own ([API keys](#api-keys)): passed to the container as `BOB_API_KEY` and `BOBSHELL_API_KEY` |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | The Docker daemon |
 | `BOBCREW_DOCKER_API_VERSION` | `1.44` | Docker Engine API version (Docker 29 needs 1.44 or newer) |
 | `BOBCREW_DEFAULT_IMAGE` | `bobcrew/bob-base:latest` | Image for sessions whose role names none |
@@ -513,7 +530,8 @@ Notes on Bob:
 - `--trust` is on by default because Bob refuses to create a session in a workspace it does not
   trust. `--auto-approve` is deliberately not on: tool calls ask for permission in the UI, and a
   request nobody answers within the permission timeout is rejected.
-- Without an API key Bob answers "Authentication required" and the session is not created.
+- Without an API key (the session's own or the server's) Bob answers "Authentication required" and the
+  session is not created.
 - The container's environment is the image's, plus the API key, `BOBCREW_SESSION_ID`, `BOBCREW_SECRETS_DIR`
   and the API's `env` (which the UI never sends). Secrets are files, not variables. Nothing comes from the
   server's own environment.
@@ -585,8 +603,13 @@ Notes on Bob:
   backslashes, colons or control characters; not under `.bobcrew/`; no file where another needs a directory),
   and written by the session's user through an exec's standard input, each via a temporary file then
   renamed. Only their paths are logged. The page cannot send them: the UI adds them from its own directory.
-- **The API key** stays in the server's configuration and the containers' environment. It is never part
-  of a response or event.
+- **The API key**: the server's stays in its configuration and the containers' environment. A session's own
+  ([API keys](#api-keys)) comes in the request that creates it and goes into that session's container
+  environment only, because Bob reads its key from nowhere else: unlike a secret it shows in `docker inspect`
+  on the server and in the environment of what the agent runs, as the server's key does. The server keeps no
+  copy once the container is created. Neither is ever part of a response, an event or a log line (a session's
+  details say only whether it has its own, `ownApiKey`). `BOB_API_KEY` and `BOBSHELL_API_KEY` are refused as
+  names of secrets and of variables.
 - **The UI app** acts with its user's token (configured, or from their Keycloak login), so it listens on
   `127.0.0.1` only and holds the token itself; no token reaches the browser's JavaScript. It refuses requests
   whose `Host` is not the loopback interface, requests from other origins, and changes without its
@@ -605,8 +628,8 @@ Keycloak user without the access role.
 |---|---|
 | `GET /me` | The token's user (`user`), whether they are an admin (`admin`), where the token is from (`issuer`: `oidc` or `token`), the capabilities their sessions may ask for (`capabilities`), how many sessions they may have open (`maxSessions`; 0 for no limit of their own) and their caps on resources (`maxMemoryBytes`, `maxCpus`; null for none) |
 | `GET /sessions` | The sessions the caller may use: their own, those shared with them (all of them for an admin) |
-| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "secrets": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}, "userProfile": [{"path": ".gitconfig", "contentBase64": "...", "executable": false}]}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). `secrets` become files in `/run/bobcrew/secrets`, `env` environment variables, `userProfile` files under `/home/bob` ([User profile files](#user-profile-files)). 400 if the image is not on the server, a variable, secret or user profile file is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the user's cap; 403 for a capability the user may not use |
-| `GET /sessions/{id}` | One session: `id`, `owner`, `sharedWith`, `title`, `image`, `containerId`, `secrets` (names), `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
+| `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "secrets": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}, "userProfile": [{"path": ".gitconfig", "contentBase64": "...", "executable": false}], "apiKey": "..."}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). `secrets` become files in `/run/bobcrew/secrets`, `env` environment variables, `apiKey` the Bob API key of this session's agent in place of the server's ([API keys](#api-keys)), `userProfile` files under `/home/bob` ([User profile files](#user-profile-files)). 400 if the image is not on the server, a variable, secret or user profile file is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the user's cap; 403 for a capability the user may not use |
+| `GET /sessions/{id}` | One session: `id`, `owner`, `sharedWith`, `title`, `image`, `containerId`, `secrets` (names), `ownApiKey` (whether it runs with a key of its own rather than the server's), `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
 | `DELETE /sessions/{id}` | Closes it and removes its container. Owner or admin only (403 for users it is shared with) |
 | `PUT /sessions/{id}/sharing` `{"users": ["bob", "carol"]}` | Shares the session with exactly these users (`[]`: nobody else), and records a `shared` event. Owner or admin only (403 for users it is shared with); at most 50 names |
 | `PUT /sessions/{id}/secrets` `{"secrets": {"NAME": "value"}}` | Replaces the values of secrets the session was created with, in the running container, runs the image's setup again, and records a `secrets_refreshed` event. Owner or admin only (403 for users it is shared with); 400 for a secret the session does not have, 409 if the session is not open |
@@ -627,9 +650,9 @@ would carry Keycloak's cross-site origin and be refused), and `GET /api/roles` (
 "description", "image", "secrets", "repository", "branch", "capabilities", "memory", "cpus"}]`, `secrets` being names only) and `GET /api/roles/{id}` (adds
 `prompt` and the raw `manifest`; 404 if there is no such role). It also rewrites `POST /api/sessions`: the page
 sends `{"title", "role", "repository", "capabilities", "resources"}`, and the server receives the role's `image`, `secrets` (values from
-`~/.bobcrew/secrets.json`) and `userProfile` (files from `~/.bobcrew/user-profile/`), the page's `repository` (`{"url", "branch"}`, or null for none) or else the role's, the page's capabilities (a list, possibly empty) or else the role's, and the page's resources or else the role's (header
+`~/.bobcrew/secrets.json`), the file's `BOB_API_KEY` as `apiKey` when it has one, and `userProfile` (files from `~/.bobcrew/user-profile/`), the page's `repository` (`{"url", "branch"}`, or null for none) or else the role's, the page's capabilities (a list, possibly empty) or else the role's, and the page's resources or else the role's (header
 `X-BobCrew-Missing-Secrets` lists the secrets the file does not have; the page may not send `image`, `env`,
-`secrets` or `userProfile` itself). It rewrites `PUT /api/sessions/{id}/secrets` too: the page sends
+`secrets`, `apiKey` or `userProfile` itself). It rewrites `PUT /api/sessions/{id}/secrets` too: the page sends
 nothing, and the server receives the values the secrets file has now for the session's secrets (the same header
 lists those it lacks). Uploads are streamed through it; other request
 bodies are limited to 2 MB.
@@ -644,7 +667,7 @@ session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss no
 
 One process on one machine, by design. A later version can split it into workers (which own the
 agent containers), stateless coordinators and a small metadata store; `SessionManager` is the seam
-for that. Also not done yet: per-user API keys, renewing GitHub tokens without a person (a GitHub App whose
+for that. Also not done yet: renewing GitHub tokens without a person (a GitHub App whose
 8-hour user tokens the UI would refresh and send to its sessions), cloning over ssh, re-cloning after a wipe,
 resuming a session after a restart, workspaces that outlive their
 session or are shared between sessions, pulling images, per-session network policies, metrics history,

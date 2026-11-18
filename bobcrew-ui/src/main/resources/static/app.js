@@ -247,6 +247,7 @@ function showHeader(session) {
     + (session.capabilities && session.capabilities.length ? ` · capabilities ${session.capabilities.join(', ')}` : '')
     + (session.resources ? ` · ${resourcesText(session.resources)}` : '')
     + (session.secrets && session.secrets.length ? ` · secrets ${session.secrets.join(', ')}` : '')
+    + (session.ownApiKey ? ' · own API key' : '')
     + (session.repository ? ` · repository ${session.repository.url}`
       + (session.repository.branch ? ` (${session.repository.branch})` : '') : '')
     + `${session.containerId ? ' · container ' + session.containerId : ''} · owner ${session.owner}`

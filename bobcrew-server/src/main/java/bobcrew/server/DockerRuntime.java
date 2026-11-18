@@ -255,9 +255,12 @@ class DockerRuntime implements Closeable {
     /**
      * Creates (but does not start) the container for a session.
      * {@code spec}'s capabilities and resources must already be checked ({@link Capabilities}, {@link Resources}).
+     * @param apiKey the Bob API key of this session, used in place of the server's; null for the server's. It is
+     * the one credential that goes into the container's environment, since Bob reads it from nowhere else; it
+     * is not part of {@code spec}, which lives as long as the session.
      * @throws ApiException 400 if the image is not on the Docker host, 502 if Docker refuses
      */
-    String create(ContainerSpec spec) {
+    String create(ContainerSpec spec, String apiKey) {
         if (!IMAGE.matcher(spec.image()).matches()) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid image name");
         }
@@ -269,9 +272,10 @@ class DockerRuntime implements Closeable {
         }
         List<String> env = new ArrayList<>();
         spec.env().forEach((name, value) -> env.add(name + "=" + value));
-        if (agent.apiKey() != null && !agent.apiKey().isBlank()) {
-            env.add("BOB_API_KEY=" + agent.apiKey());
-            env.add("BOBSHELL_API_KEY=" + agent.apiKey());
+        String key = apiKey != null ? apiKey : agent.apiKey();
+        if (key != null && !key.isBlank()) {
+            env.add("BOB_API_KEY=" + key);
+            env.add("BOBSHELL_API_KEY=" + key);
         }
         env.add("BOBCREW_SESSION_ID=" + spec.sessionId());
         env.add("BOBCREW_SECRETS_DIR=" + SECRETS_DIR);

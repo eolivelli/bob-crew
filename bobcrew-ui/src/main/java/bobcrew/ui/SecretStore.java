@@ -15,7 +15,8 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Where the values of a role's {@code secrets} come from: one JSON object of names and string values, by default
- * {@code ~/.bobcrew/secrets.json}, such as {@code {"GH_TOKEN": "github_pat_...", "GIT_USER_NAME": "Ada"}}.
+ * {@code ~/.bobcrew/secrets.json}, such as {@code {"GH_TOKEN": "github_pat_...", "GIT_USER_NAME": "Ada"}}. It
+ * also holds the user's own Bob API key, {@link #API_KEY}, which is passed with every session.
  *
  * <p>A file of its own rather than this app's environment, so that a session gets exactly what the user put there
  * for sessions, never whatever else happens to be exported in the shell that started the UI. It is read again for
@@ -30,6 +31,14 @@ class SecretStore {
     static final Pattern NAME = RoleRegistry.SECRET_NAME;
 
     static final long MAX_BYTES = 1024 * 1024;
+
+    /**
+     * The one name that is not a role's secret: the user's own Bob API key. When the file has it, every session
+     * this UI creates uses it in place of the server's key, so that users of a shared server each work with their
+     * own. It is not written as a file in the container: Bob reads its key from its environment only, so the
+     * server puts it there ({@code apiKey} in the request).
+     */
+    static final String API_KEY = "BOB_API_KEY";
 
     private final Path file;
 

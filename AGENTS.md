@@ -99,7 +99,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 
 | Class | Role |
 |---|---|
-| `ProxyController` | Forwards `/api/**` to the server with the server's token, or the user's login (`OidcLogin.currentToken()`; 401 `{"login": "/login"}` without one); streams responses through, and upload request bodies too (other bodies are read whole, up to 2 MB). Rewrites a secrets refresh (`PUT .../sessions/{id}/secrets`: nothing in, the secrets file's values for the session's secret names out). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`), `userProfile` (from `UserProfileStore`) and `repository` out; the browser's `repository` (or null) and `capabilities` replace the role's; refuses `image`/`env`/`secrets`/`userProfile` sent by the browser. |
+| `ProxyController` | Forwards `/api/**` to the server with the server's token, or the user's login (`OidcLogin.currentToken()`; 401 `{"login": "/login"}` without one); streams responses through, and upload request bodies too (other bodies are read whole, up to 2 MB). Rewrites a secrets refresh (`PUT .../sessions/{id}/secrets`: nothing in, the secrets file's values for the session's secret names out). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`), `apiKey` (the secrets file's `BOB_API_KEY`, with or without a role), `userProfile` (from `UserProfileStore`) and `repository` out; the browser's `repository` (or null) and `capabilities` replace the role's; refuses `image`/`env`/`secrets`/`apiKey`/`userProfile` sent by the browser. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
 | `ServerConnection` | Server URL, token (none when the login provides it), and the HTTP client with the trusted CA. |
 | `OidcLogin`, `LoginController` | The user's Keycloak login: authorization code with PKCE as a public client, `state` once and for 10 minutes, tokens in memory only, refreshed 30 s before expiry; `/login`, `/login/callback`, `/logout`, `/api/login`. |
@@ -195,10 +195,14 @@ These are requirements, not preferences. A change that weakens one needs an expl
 the maintainer.
 
 - The Bob API key stays in server configuration and the container's environment. It must never appear
-  in a DTO, an event, a log line, or `toString()`. The same goes for the values of the environment
+  in a DTO, an event, a log line, or `toString()`. A session may bring its own (`apiKey` when it is created, which
+  the UI takes from `BOB_API_KEY` in `~/.bobcrew/secrets.json` for every session): it replaces the server's in that
+  container's environment, under the same rules, and `AgentSession` drops it once the container is created
+  (it is not in `ContainerSpec`). It is the one credential in the environment, because Bob reads it from nowhere
+  else; `BOB_API_KEY` and `BOBSHELL_API_KEY` are refused as secret names so that nothing else takes that path. The same goes for the values of the environment
   variables and secrets clients pass (`ContainerSpec.toString()`, `CreateRequest.toString()` and the logs
   show names only).
-- Secrets are files, never environment variables: `DockerRuntime.writeSecrets` puts them in the tmpfs
+- Secrets are files, never environment variables (the API key above is the one exception): `DockerRuntime.writeSecrets` puts them in the tmpfs
   `/run/bobcrew/secrets` (mode 700, files 400, the session's user) through an exec's standard input, never a
   command line, and `AgentSession` drops the values once written. Images read them from there when needed
   (bob-base's `gh` wrapper and `git-credential-bobcrew`); do not export them in a `profile.d` snippet. The UI
@@ -235,7 +239,7 @@ the maintainer.
   this the default, never apply it to sessions that did not ask, and keep host mounts out of it too (image
   `VOLUME`s are anonymous and removed with the container).
 - Session creation from the browser goes through the UI's role expansion: the page never sees
-  secret values and cannot pick an image, secrets, variables or user profile files itself. It may name the
+  secret values and cannot pick an image, secrets, an API key, variables or user profile files itself. It may name the
   `repository` and branch to clone (the role's are the default; `ProxyController` checks the page's with the
   role's patterns, https and no credentials, and the server checks again), and ask for `capabilities` (the role's
   are the default, the page's list replaces them) and `resources`; the server decides whether they are allowed.

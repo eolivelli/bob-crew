@@ -467,6 +467,48 @@ class ServerIntegrationTest {
     }
 
     @Test
+    void aSessionRunsWithItsOwnApiKey() throws Exception {
+        String ownKey = "alices-own-key-that-must-never-leak";
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("apiKey", ownKey);
+        body.put("secrets", Map.of("GH_TOKEN", "a-token"));
+        HttpResponse<String> response = send("POST", "/sessions", JSON.writeValueAsString(body), alice);
+        assertThat(response.statusCode()).isEqualTo(201);
+        assertThat(response.body()).doesNotContain(ownKey).doesNotContain(API_KEY);
+        JsonNode session = JSON.readTree(response.body());
+        String id = session.get("id").asString();
+        created.add(id);
+        assertThat(session.get("ownApiKey").asBoolean()).isTrue();
+        assertThat(session.get("secrets")).as("not one of the secret files").hasSize(1);
+
+        // the agent has it where Bob reads it, in place of the server's
+        for (String name : List.of("BOB_API_KEY", "BOBSHELL_API_KEY")) {
+            assertThat(ask(id, "showenv " + name)).contains("env " + name + "=" + ownKey);
+        }
+        String containerId = session.get("containerId").asString();
+        assertThat(execOutput(containerId, "ls", "/run/bobcrew/secrets").strip()).isEqualTo("GH_TOKEN");
+
+        // it cannot be replaced like a secret, and nothing the server answers shows it
+        HttpResponse<String> refresh = send("PUT", "/sessions/" + id + "/secrets",
+                JSON.writeValueAsString(Map.of("secrets", Map.of("BOB_API_KEY", "another"))), alice);
+        assertThat(refresh.statusCode()).isEqualTo(400);
+        assertThat(send("GET", "/sessions/" + id, null, alice).body()).doesNotContain(ownKey);
+
+        // a session without one still gets the server's
+        JsonNode plain = createSession("plain");
+        assertThat(plain.get("ownApiKey").asBoolean()).isFalse();
+        assertThat(ask(plain.get("id").asString(), "showenv BOB_API_KEY")).contains("env BOB_API_KEY=" + API_KEY);
+    }
+
+    /** Prompts the agent of an idle session and returns what it said in that turn. */
+    private String ask(String id, String text) throws Exception {
+        long before = JSON.readTree(send("GET", "/sessions/" + id, null, alice).body()).get("lastSeq").asLong();
+        assertThat(send("POST", "/sessions/" + id + "/prompt", JSON.writeValueAsString(Map.of("text", text)), alice)
+            .statusCode()).isEqualTo(202);
+        return agentText(events(id, before, event -> isStatus(event, "IDLE")));
+    }
+
+    @Test
     void theOwnerReplacesTheSecretsOfARunningSession() throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("secrets", Map.of("GH_TOKEN", "old-token", "GIT_USER_NAME", "Ada"));
@@ -613,6 +655,15 @@ class ServerIntegrationTest {
             assertThat(createStatus(Map.of("secrets", Map.of(name, "x")))).as(name).isEqualTo(400);
         }
         assertThat(createStatus(Map.of("secrets", Map.of("BIG", "x".repeat(40_000))))).isEqualTo(400);
+        // the API key is not a secret file, and must fit in an environment variable
+        for (String name : List.of("BOB_API_KEY", "BOBSHELL_API_KEY")) {
+            HttpResponse<String> notAFile = send("POST", "/sessions",
+                    JSON.writeValueAsString(Map.of("secrets", Map.of(name, "x"))), alice);
+            assertThat(notAFile.statusCode()).as(name).isEqualTo(400);
+            assertThat(notAFile.body()).as(name).contains("apiKey");
+        }
+        assertThat(createStatus(Map.of("apiKey", "x".repeat(40_000)))).isEqualTo(400);
+        assertThat(createStatus(Map.of("apiKey", "two\nlines"))).isEqualTo(400);
         assertThat(JSON.readTree(send("GET", "/sessions", null, alice).body())).isEmpty();
         assertThat(TestDocker.client().listContainersCmd().withShowAll(true)
             .withLabelFilter(Map.of(DockerRuntime.LABEL_INSTANCE, instanceId)).exec())

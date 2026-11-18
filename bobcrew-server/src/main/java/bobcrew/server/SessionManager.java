@@ -40,6 +40,12 @@ public class SessionManager {
     private static final Set<String> RESERVED_ENV = Set.of("BOB_API_KEY", "BOBSHELL_API_KEY", "PATH", "HOME", "USER",
             "LOGNAME", "SHELL", "HOSTNAME");
 
+    /**
+     * The variables Bob reads its API key from. Not names for secrets: a session's own key is the request's
+     * {@code apiKey}, which goes into these variables rather than into a file.
+     */
+    private static final Set<String> API_KEY_NAMES = Set.of("BOB_API_KEY", "BOBSHELL_API_KEY");
+
     /** Most users a session can be shared with. */
     static final int MAX_SHARED_USERS = 50;
 
@@ -74,13 +80,16 @@ public class SessionManager {
      * @param capabilities what the agent may run besides commands ({@link Capabilities}); null or empty for none.
      * Only those the caller may use ({@link Caller#capabilities()}).
      * @param resources the container's limits, already checked against the caller's ({@link Resources#of})
+     * @param apiKey the Bob API key this session uses in place of the server's, which is how each user of a shared
+     * server works with their own; null or blank for the server's. Unlike a secret it reaches the agent through
+     * the container's environment, the only place Bob reads it from.
      * @throws ApiException 400 for a bad image, environment, repository or capability, 403 for an image or a
      * capability the caller may not use, 429 when the server or the user's share of it is full, 502 if the
      * agent fails
      */
     AgentSession create(Caller caller, String title, String image, Map<String, String> env, Map<String, String> secrets,
             List<ProfileFile> userProfile, GitRepository repository,
-            List<String> capabilities, Resources resources) {
+            List<String> capabilities, Resources resources, String apiKey) {
         String owner = caller.name();
         List<String> checkedCapabilities = Capabilities.check(capabilities, caller.capabilities());
         String chosenImage = image == null || image.isBlank() ? docker.defaultImage() : image.strip();
@@ -88,10 +97,12 @@ public class SessionManager {
         Map<String, String> checkedEnv = checkEnv(env);
         Map<String, String> checkedSecrets = checkSecrets(secrets);
         List<ProfileFile> checkedUserProfile = checkUserProfile(userProfile);
+        String checkedApiKey = checkApiKey(apiKey);
         String id = UUID.randomUUID().toString();
         AgentSession session = new AgentSession(new DockerRuntime.ContainerSpec(id, owner, chosenImage, checkedEnv,
                 checkedCapabilities, resources),
-                repository, checkedSecrets, checkedUserProfile, title == null || title.isBlank() ? chosenImage : title.strip(), docker, properties);
+                repository, checkedSecrets, checkedUserProfile, title == null || title.isBlank() ? chosenImage : title.strip(), checkedApiKey,
+                docker, properties);
         synchronized (this) {
             if (stopping) {
                 throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "The server is shutting down");
@@ -118,7 +129,8 @@ public class SessionManager {
         }
         log.info("Session {} created by {} with image {}, environment {}, secrets {}, user-profile {} files{}", session.id(), owner,
                 chosenImage, checkedEnv.keySet(), checkedSecrets.keySet(), checkedUserProfile.size(),
-                (repository == null ? "" : ", repository " + repository.url())
+                (checkedApiKey == null ? "" : ", its own API key")
+                        + (repository == null ? "" : ", repository " + repository.url())
                         + (checkedCapabilities.isEmpty() ? "" : ", capabilities " + checkedCapabilities
                                 + " (privileged)")
                         + ", memory " + (resources.memoryBytes() == null ? "unlimited" : resources.memoryBytes() + " bytes")
@@ -170,12 +182,33 @@ public class SessionManager {
             if (name == null || !ENV_NAME.matcher(name).matches()) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid secret name");
             }
+            if (API_KEY_NAMES.contains(name)) {
+                // as a file it would do nothing, and its owner would believe the session uses it
+                throw new ApiException(HttpStatus.BAD_REQUEST, "The Bob API key is not a secret file: pass it as "
+                        + "apiKey when creating the session (it cannot be changed afterwards)");
+            }
             if (value == null || value.length() > limits.maxEnvValueLength()) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "The secret " + name + " is missing or too long");
             }
             checked.put(name, value);
         });
         return checked;
+    }
+
+    /**
+     * The API key becomes the value of environment variables, so it must fit in one: no control characters (a
+     * line break or NUL would not survive), and no longer than a variable may be.
+     * @return the key, or null for the server's
+     */
+    private String checkApiKey(String apiKey) {
+        if (apiKey == null || apiKey.isBlank()) {
+            return null;
+        }
+        String key = apiKey.strip();
+        if (key.length() > properties.docker().maxEnvValueLength() || key.chars().anyMatch(Character::isISOControl)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "The API key is too long or has control characters");
+        }
+        return key;
     }
 
     static final int MAX_PROFILE_FILES = 64;

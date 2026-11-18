@@ -43,6 +43,11 @@ is left out, and the page says so. Nothing comes from the UI's own environment. 
 session (you, the users you share it with, admins) can ask its agent for these values, so use tokens with
 the narrowest scope that does the job.
 
+One name in that file is special: `BOB_API_KEY`, your own Bob API key. When it is there, every session you
+create runs Bob with it instead of the server's key, whatever the role (no role needs to list it). It is not
+a file in the session: the server puts it in the agent's environment, where Bob reads it. A new key applies
+to the sessions you create afterwards, not to running ones.
+
 Use an expiring fine-grained token for `GH_TOKEN`. When it is about to expire, make a new one on GitHub, put
 it in `secrets.json`, and click **Refresh secrets in my sessions** in the sidebar (or **Refresh secrets** in
 one session): the running sessions get the new value without being restarted.

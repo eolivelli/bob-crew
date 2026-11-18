@@ -41,14 +41,15 @@ class SessionController {
      */
     record CreateRequest(String title, String image, Map<String, String> env, Map<String, String> secrets,
             RepositoryRequest repository, List<String> capabilities, ResourcesRequest resources,
-            List<ProfileFile> userProfile) {
+            List<ProfileFile> userProfile, String apiKey) {
 
         @Override
         public String toString() {
             return "CreateRequest[title=" + title + ", image=" + image + ", env="
                     + (env == null ? "{}" : env.keySet()) + ", secrets=" + (secrets == null ? "{}" : secrets.keySet())
                     + ", repository=" + repository + ", capabilities=" + capabilities + ", resources=" + resources
-                    + ", userProfile=" + (userProfile == null ? "[]" : userProfile.stream().map(ProfileFile::path).toList()) + "]";
+                    + ", userProfile=" + (userProfile == null ? "[]" : userProfile.stream().map(ProfileFile::path).toList())
+                    + ", apiKey=" + (apiKey == null || apiKey.isBlank() ? "<none>" : "<set>") + "]";
         }
     }
 
@@ -134,7 +135,7 @@ class SessionController {
                 : Resources.of(request.resources().memory(), request.resources().cpus(), properties.docker(),
                         caller.limits());
         return sessions.create(caller, title, request.image(), request.env(), request.secrets(),
-                request.userProfile(), repository, request.capabilities(), resources).info();
+                request.userProfile(), repository, request.capabilities(), resources, request.apiKey()).info();
     }
 
     @GetMapping("/sessions/{id}")

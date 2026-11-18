@@ -165,7 +165,8 @@ EOF
   echo "updated $REMOTE_DIR/server.env"
 elif ! rssh "test -f '$REMOTE_DIR/server.env'"; then
   echo "warning: BOB_API_KEY is not set here and the remote machine has no server.env;" \
-       "Bob will answer 'Authentication required' unless it has another login" >&2
+       "Bob will answer 'Authentication required' unless users bring their own key" \
+       "(BOB_API_KEY in their ~/.bobcrew/secrets.json)" >&2
 fi
 
 if [[ -n "$keycloak" ]]; then

@@ -35,8 +35,9 @@ import tools.jackson.databind.node.ObjectNode;
  *
  * <p>Creating a session is the one request it rewrites: the browser names a {@code role}, and the request
  * forwarded carries that role's {@code image}, {@code secrets} (with their values from the secrets file,
- * {@link SecretStore}) and {@code repository}. So the values never pass through the browser, and the page cannot
- * choose an image or pass secrets or variables: a request that tries is refused. Nothing comes from this app's
+ * {@link SecretStore}) and {@code repository}, and, whatever the role, the user's own Bob API key as {@code apiKey}
+ * when the secrets file has one ({@link SecretStore#API_KEY}). So the values never pass through the browser, and
+ * the page cannot choose an image or pass secrets, a key or variables: a request that tries is refused. Nothing comes from this app's
  * own environment. What the user may change when starting a session is the repository to clone (the role's is
  * the default; the page's own, or none, replaces it), the capabilities (the role's are the default; the
  * page's list replaces them) and the resources.
@@ -262,8 +263,10 @@ class ProxyController {
 
     /**
      * Turns the browser's {@code {"title": ..., "role": ...}} into what the server takes:
-     * {@code {"title": ..., "image": ..., "secrets": {...}, "repository": {"url": ..., "branch": ...}}}. Secrets the
-     * role lists but the secrets file does not have are left out and added to {@code missingSecrets} (names only).
+     * {@code {"title": ..., "image": ..., "secrets": {...}, "apiKey": ..., "repository": {"url": ..., "branch": ...}}}.
+     * Secrets the role lists but the secrets file does not have are left out and added to {@code missingSecrets}
+     * (names only). The secrets file's {@code BOB_API_KEY}, when there, becomes {@code apiKey} for every session,
+     * with or without a role, and never one of {@code secrets}.
      * A {@code repository} or {@code capabilities} the page sends replaces the role's ({@code "repository": null}
      * and {@code "capabilities": []} meaning none); left out, the role's apply.
      * @return the body to forward, or empty if an error was sent instead
@@ -295,10 +298,25 @@ class ProxyController {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST, "The request is not valid JSON");
             return Optional.empty();
         }
-        if (request.has("image") || request.has("env") || request.has("secrets") || request.has("userProfile")) {
+        if (request.has("image") || request.has("env") || request.has("secrets") || request.has("userProfile")
+                || request.has("apiKey")) {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-                    "The image, secrets and userProfile of a session come from its role or configuration");
+                    "The image, secrets, API key and userProfile of a session come from its role or configuration");
             return Optional.empty();
+        }
+        Map<String, String> available;
+        try {
+            available = secrets.load();
+        } catch (IllegalStateException e) {
+            sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+            return Optional.empty();
+        }
+        // the user's own Bob API key, for every session whatever its role: the server puts it where Bob reads it
+        // (the agent's environment), in place of its own key
+        String apiKey = available.get(SecretStore.API_KEY);
+        boolean ownApiKey = apiKey != null && !apiKey.isBlank();
+        if (ownApiKey) {
+            request.put("apiKey", apiKey);
         }
         // the user may name the repository to clone, or none, instead of the role's; the server checks it again
         boolean repositoryChosen = request.has("repository");
@@ -336,21 +354,17 @@ class ProxyController {
                 request.put("image", role.get().image());
             }
             ObjectNode passed = json.createObjectNode();
-            if (!role.get().secrets().isEmpty()) {
-                Map<String, String> available;
-                try {
-                    available = secrets.load();
-                } catch (IllegalStateException e) {
-                    sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-                    return Optional.empty();
-                }
-                for (String name : role.get().secrets()) {
-                    String value = available.get(name);
-                    if (value == null) {
+            for (String name : role.get().secrets()) {
+                String value = available.get(name);
+                if (name.equals(SecretStore.API_KEY)) {
+                    // never a file: it went as the API key above, if the secrets file has it
+                    if (!ownApiKey) {
                         missingSecrets.add(name);
-                    } else {
-                        passed.put(name, value);
                     }
+                } else if (value == null) {
+                    missingSecrets.add(name);
+                } else {
+                    passed.put(name, value);
                 }
             }
             if (!passed.isEmpty()) {
@@ -382,14 +396,15 @@ class ProxyController {
                 }
                 request.set("resources", merged);
             }
-            log.info("Creating a session with role {} (image {}, secrets {}, not in the secrets file: {}, repository {}, "
-                    + "capabilities {}, resources {})",
+            log.info("Creating a session with role {} (image {}, secrets {}, not in the secrets file: {}, API key {}, "
+                    + "repository {}, capabilities {}, resources {})",
                     role.get().id(), role.get().image() == null ? "default" : role.get().image(), passed.propertyNames(),
-                    missingSecrets, request.path("repository").path("url").asString("none"),
+                    missingSecrets, ownApiKey ? "from the secrets file" : "the server's", request.path("repository").path("url").asString("none"),
                     request.path("capabilities"), request.path("resources"));
         } else {
-            log.info("Creating a session without role (image default, secrets [], repository {}, "
+            log.info("Creating a session without role (image default, secrets [], API key {}, repository {}, "
                     + "capabilities {}, resources {})",
+                    ownApiKey ? "from the secrets file" : "the server's",
                     request.path("repository").path("url").asString("none"),
                     request.path("capabilities"), request.path("resources"));
         }

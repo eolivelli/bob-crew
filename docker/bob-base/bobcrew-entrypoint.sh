@@ -3,7 +3,7 @@
 #
 # The server starts the container with the agent command as arguments (by default
 # `bob acp --trust ...`), a non-root uid:gid, the working directory /opt/workspace, and an environment
-# made only of the API key, BOBCREW_SESSION_ID and the variables the client passed. It then speaks ACP
+# made only of the API key (the session's own, or else the server's), BOBCREW_SESSION_ID and the variables the client passed. It then speaks ACP
 # (newline-delimited JSON-RPC) on the container's standard input and output.
 #
 # So this script must:
