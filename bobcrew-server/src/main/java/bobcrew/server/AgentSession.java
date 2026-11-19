@@ -246,6 +246,33 @@ final class AgentSession {
         }
     }
 
+    /**
+     * Writes updated user profile files into {@code /home/bob} of the running container. Any file already
+     * there at the same path is replaced atomically. A {@link UiEvent#USER_PROFILE_REFRESHED} event records
+     * who did it and how many files were written. Who may do this is {@link SessionAccessPolicy}'s decision,
+     * made before.
+     * @param files already validated profile files
+     * @throws ApiException 400 if there are no files, 409 if the session is not open
+     */
+    void refreshUserProfile(String by, List<ProfileFile> files) {
+        requireOpen();
+        if (files.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "No user profile files found; nothing to refresh");
+        }
+        // serialise with secret refreshes so the two do not interleave inside the container
+        secretsRefresh.lock();
+        try {
+            requireOpen();
+            docker.writeUserProfile(containerId, files, properties.requestTimeout());
+            touch();
+            events.append(UiEvent.USER_PROFILE_REFRESHED, by, Map.of("count", files.size()));
+            log.info("Session {}: {} refreshed {} user profile file(s)", id, by, files.size());
+        } finally {
+            secretsRefresh.unlock();
+        }
+    }
+
     Status status() {
         return status;
     }

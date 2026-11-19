@@ -109,6 +109,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `UserProfileStore` | Where user profile files come from: `~/.bobcrew/user-profile/` (`bobcrew.ui.user-profile-dir`), regular files loaded and Base64-encoded for every new session and synced into `/home/bob/` in the container. |
 | `static/app.js` | The front end: plain JavaScript, no build step, no dependencies. |
 | `static/links.js` | Makes `https://` links in agent and user text clickable (https only, built as DOM elements, never HTML). Tested with `node bobcrew-ui/src/test/js/links.test.js` (Maven runs it too). |
+| `static/bell.js` | The attention bell: which events ring it (`shouldRing`) and the tone (Web Audio, no sound file). `app.js` keeps the checkbox (`bell-toggle`, remembered as a boolean in `localStorage`) and the baseline that keeps replayed events silent. Tested with `node bobcrew-ui/src/test/js/bell.test.js` (Maven runs it too). |
 | `static/transcript-export.js` | Content-to-text helpers and the transcript export (events to a gzipped HTML page). Builds HTML as a string, so all text goes through `esc()`. Tested with `node bobcrew-ui/src/test/js/transcript-export.test.js` (Maven runs it too). |
 
 ## How a prompt flows

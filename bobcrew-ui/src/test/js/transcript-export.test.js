@@ -60,6 +60,40 @@ const midClear = ctx.buildTranscriptHtml(session, [...events, ev(30, 'cleared', 
   { exportedAt: new Date(), exportedBy: '' });
 assert(!midClear.includes('hello') && !midClear.includes('Plan') && midClear.includes('later'), 'history before a clear is dropped');
 
+// every box carries when it happened as its tooltip (the time of the event that made it, to the second, UTC)
+const tipped = (html.match(/title="2026-11-13 10:00:00 UTC"/g) || []).length;
+assert.strictEqual(tipped, 11, 'user, thought, agent, tool, plan, permission, turn end, error, three divider boxes');
+for (const cls of ['msg user', 'msg thought', 'msg agent', 'card tool', 'card plan', 'card permission', 'divider', 'msg error']) {
+  assert(html.includes(`<div class="${cls}" title="2026-11-13 10:00:00 UTC"`), cls + ' has its time');
+}
+assert(!html.includes('title="">'), 'no empty tooltip');
+const later = ctx.buildTranscriptHtml(session, [{ ...ev(1, 'update', { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'a' } }), time: '2026-11-13T10:05:09Z' },
+  { ...ev(2, 'update', { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'b' } }), time: '2026-11-13T10:07:00Z' }],
+  { exportedAt: new Date(), exportedBy: '' });
+assert(later.includes('title="2026-11-13 10:05:09 UTC">ab<'), 'a message that grows from chunks keeps the time of its first');
+assert.strictEqual(ctx.formatTimeFull('nonsense'), '');
+
+// the live page's tooltips
+assert.strictEqual(ctx.ageText(0), 'just now');
+assert.strictEqual(ctx.ageText(4999), 'just now');
+assert.strictEqual(ctx.ageText(-3000), 'just now', 'a clock a little behind the server');
+assert.strictEqual(ctx.ageText(5000), '5 s ago');
+assert.strictEqual(ctx.ageText(59999), '59 s ago');
+assert.strictEqual(ctx.ageText(5 * 60000), '5 min ago');
+assert.strictEqual(ctx.ageText((2 * 60 + 5) * 60000), '2 h 5 min ago');
+assert.strictEqual(ctx.ageText((3 * 24 + 4) * 3600000), '3 d 4 h ago');
+assert(ctx.timeTitle('2026-11-13T10:00:00Z', Date.parse('2026-11-13T10:05:00Z')).endsWith(' · 5 min ago'));
+assert.strictEqual(ctx.timeTitle('nonsense', 0), '');
+
+// the up arrow in an empty input box brings back the user's own last prompt
+const prompts = [ev(1, 'user_prompt', { text: 'first' }, 'alice'), ev(2, 'user_prompt', { text: 'second' }, 'alice'),
+  ev(3, 'user_prompt', { text: "bob's" }, 'bob'), ev(4, 'turn_end', {}), ev(5, 'user_prompt', { text: '' }, 'alice')];
+assert.strictEqual(ctx.lastPromptOf(prompts, 'alice'), 'second');
+assert.strictEqual(ctx.lastPromptOf(prompts, 'bob'), "bob's");
+assert.strictEqual(ctx.lastPromptOf(prompts, 'carol'), null);
+assert.strictEqual(ctx.lastPromptOf([], 'alice'), null);
+assert.strictEqual(ctx.lastPromptOf([ev(1, 'cleared', {}, 'alice')], 'alice'), null);
+
 // uploads and the clone show as one-line dividers, escaped
 const workspace = ctx.buildTranscriptHtml({ ...session, capabilities: ['docker', '<x>'], repository: { url: 'https://github.com/a/<b>', branch: 'main' } }, [
   ev(1, 'repository_cloned', { url: 'https://github.com/a/<b>', branch: 'main', path: '/opt/workspace/b' }),

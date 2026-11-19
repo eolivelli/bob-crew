@@ -241,6 +241,17 @@ class SessionController {
         return sessions.resumeArchived(caller, id, body.secrets(), body.apiKey(), body.userProfile());
     }
 
+
+    /**
+     * Writes updated user profile files into {@code /home/bob} of the running container, replacing any
+     * file already there at the same path. Only the owner or an admin may.
+     */
+    @PutMapping("/sessions/{id}/userprofile")
+    AgentSession.Info refreshUserProfile(@PathVariable String id,
+            @RequestBody List<ProfileFile> files, Caller caller) {
+        return sessions.refreshUserProfile(caller, id, files);
+    }
+
     /** Closes the session; with {@code ?archive=true} its transcript is kept, to read later under /archives. */
     @DeleteMapping("/sessions/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)

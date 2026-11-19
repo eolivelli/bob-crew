@@ -33,6 +33,15 @@ function joinParts(parts) {
     .join('\n\n');
 }
 
+// The text of the last prompt that `user` sent, or null: what the up arrow brings back into an empty input box.
+function lastPromptOf(events, user) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.type === 'user_prompt' && event.user === user && event.data && event.data.text) return event.data.text;
+  }
+  return null;
+}
+
 function esc(value) {
   return String(value === undefined || value === null ? '' : value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -48,6 +57,31 @@ function cssToken(value) {
 function formatTime(time) {
   const date = new Date(time);
   return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+}
+
+// A box's tooltip in the exported page: when its event happened, to the second, in UTC (the file is read elsewhere).
+function formatTimeFull(time) {
+  const date = new Date(time);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
+}
+
+// How long ago something was, for the live page's tooltips: "just now", "5 min ago", "2 h 5 min ago", "3 d 4 h ago".
+function ageText(milliseconds) {
+  const seconds = Math.floor(milliseconds / 1000);
+  if (!(seconds >= 5)) return 'just now';
+  if (seconds < 60) return `${seconds} s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ${minutes % 60} min ago`;
+  return `${Math.floor(hours / 24)} d ${hours % 24} h ago`;
+}
+
+// The live page's tooltip for a box: its event's time in the browser's time zone, and how long ago that was.
+function timeTitle(time, now) {
+  const date = new Date(time);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.toLocaleString()} · ${ageText(now - date.getTime())}`;
 }
 
 const TRANSCRIPT_CSS = `
@@ -148,7 +182,7 @@ function transcriptItems(events) {
         permissions.clear();
         streaming = null;
         plan = null;
-        items.push({ type: 'divider', text: 'session cleared' + (event.user ? ' by ' + event.user : '') });
+        items.push({ type: 'divider', time: event.time, text: 'session cleared' + (event.user ? ' by ' + event.user : '') });
         break;
       case 'user_prompt':
         streaming = null;
@@ -161,7 +195,7 @@ function transcriptItems(events) {
           case 'agent_thought_chunk': {
             const kind = data.sessionUpdate === 'agent_message_chunk' ? 'agent' : 'thought';
             if (!streaming || streaming.kind !== kind) {
-              streaming = { type: 'message', kind, text: '' };
+              streaming = { type: 'message', kind, time: event.time, text: '' };
               items.push(streaming);
             }
             streaming.text += textOf(data.content);
@@ -171,7 +205,7 @@ function transcriptItems(events) {
           case 'tool_call_update': {
             let card = toolCalls.get(data.toolCallId);
             if (!card) {
-              card = { type: 'tool', title: '', status: '', output: null };
+              card = { type: 'tool', time: event.time, title: '', status: '', output: null };
               toolCalls.set(data.toolCallId, card);
               items.push(card);
               streaming = null;
@@ -184,7 +218,7 @@ function transcriptItems(events) {
           }
           case 'plan':
             if (!plan) {
-              plan = { type: 'plan', entries: [] };
+              plan = { type: 'plan', time: event.time, entries: [] };
               items.push(plan);
               streaming = null;
             }
@@ -197,6 +231,7 @@ function transcriptItems(events) {
         streaming = null;
         const card = {
           type: 'permission',
+          time: event.time,
           title: (data.toolCall && data.toolCall.title) || data.toolCallId,
           options: data.options || [],
           result: '',
@@ -216,24 +251,29 @@ function transcriptItems(events) {
       }
       case 'turn_end':
         streaming = null;
-        items.push({ type: 'divider', text: turnEndText(data.stopReason) });
+        items.push({ type: 'divider', time: event.time, text: turnEndText(data.stopReason) });
         break;
       case 'error':
         streaming = null;
-        items.push({ type: 'error', text: data.message || 'Error' });
+        items.push({ type: 'error', time: event.time, text: data.message || 'Error' });
         break;
       case 'file_uploaded':
       case 'repository_cloned':
-        items.push({ type: 'divider', text: workspaceEventText(event) });
+        items.push({ type: 'divider', time: event.time, text: workspaceEventText(event) });
         break;
       case 'secrets_refreshed':
-        items.push({ type: 'divider', text: secretsRefreshedText(event) });
+        items.push({ type: 'divider', time: event.time, text: secretsRefreshedText(event) });
         break;
       case 'resumed':
-        items.push({ type: 'divider', text: resumedText(event) });
+        items.push({ type: 'divider', time: event.time, text: resumedText(event) });
         break;
+      case 'user_profile_refreshed': {
+        const count = event.data && event.data.count != null ? event.data.count : '?';
+        items.push({ type: 'divider', time: event.time, text: `${event.user || 'someone'} refreshed the user profile (${count} file(s))` });
+        break;
+      }
       case 'shared':
-        items.push({ type: 'divider', text: sharedEventText(event) });
+        items.push({ type: 'divider', time: event.time, text: sharedEventText(event) });
         break;
       default: break;
     }
@@ -242,34 +282,35 @@ function transcriptItems(events) {
 }
 
 function itemHtml(item) {
+  const when = formatTimeFull(item.time);
+  const tip = when ? ` title="${esc(when)}"` : '';
   switch (item.type) {
     case 'user': {
-      const when = formatTime(item.time);
-      const who = [item.who, when].filter(Boolean).join(' · ');
-      return `<div class="msg user"><span class="who">${esc(who)}</span>${esc(item.text)}</div>`;
+      const who = [item.who, formatTime(item.time)].filter(Boolean).join(' · ');
+      return `<div class="msg user"${tip}><span class="who">${esc(who)}</span>${esc(item.text)}</div>`;
     }
     case 'message':
-      return `<div class="msg ${item.kind}">${esc(item.text)}</div>`;
+      return `<div class="msg ${item.kind}"${tip}>${esc(item.text)}</div>`;
     case 'tool': {
       const status = item.status
         ? `<span class="status status-${cssToken(item.status)}">${esc(item.status.replace('_', ' '))}</span>` : '';
       const output = item.output !== null ? `<pre>${esc(item.output)}</pre>` : '';
-      return `<div class="card tool"><div class="head">${status}<span class="title">${esc(item.title)}</span></div>${output}</div>`;
+      return `<div class="card tool"${tip}><div class="head">${status}<span class="title">${esc(item.title)}</span></div>${output}</div>`;
     }
     case 'plan': {
       const entries = item.entries
         .map((entry) => `<li class="${cssToken(entry.status)}">${esc(entry.content)}</li>`).join('');
-      return `<div class="card plan"><div class="title">Plan</div><ol>${entries}</ol></div>`;
+      return `<div class="card plan"${tip}><div class="title">Plan</div><ol>${entries}</ol></div>`;
     }
     case 'permission': {
       const options = item.options.map((option) => esc(option.name)).join(' / ');
-      return `<div class="card permission"><div class="title">Permission needed: ${esc(item.title)}</div>`
+      return `<div class="card permission"${tip}><div class="title">Permission needed: ${esc(item.title)}</div>`
         + `<div class="options">${esc(options)}</div><div class="result">${esc(item.result)}</div></div>`;
     }
     case 'divider':
-      return `<div class="divider">${esc(item.text)}</div>`;
+      return `<div class="divider"${tip}>${esc(item.text)}</div>`;
     case 'error':
-      return `<div class="msg error">${esc(item.text)}</div>`;
+      return `<div class="msg error"${tip}>${esc(item.text)}</div>`;
     default:
       return '';
   }

@@ -448,12 +448,25 @@ Each message, tool call and plan in a session has a **Copy** button beside it (i
 the box), which puts the box's plain text on the clipboard: a message as it was written, a tool call as its
 title, input and output.
 
+Every box in the conversation shows, as a tooltip, when it happened (in your time zone, with how long ago
+that was). A message that streams in shows the time of its first part. The exported transcript carries the
+same as a tooltip on each box, as UTC to the second.
+
+In the prompt box, **Enter** sends and **Shift+Enter** starts a new line. **Up arrow** in an empty box brings back
+your last prompt in this session, to send again or to change.
+
 The **Export transcript** button in a session's header downloads the whole session as one
 standalone HTML page, gzipped (`<title>-<date>.html.gz`; `gunzip` it, then open it). It is built in
 the browser from the events the page has received, so it contains what the server still holds: the
 last `bobcrew.event-buffer-size` events (5000 by default), and the page says so when the start of a
 session is missing. The file has no scripts and carries a Content-Security-Policy that blocks all
 network access.
+
+The **Bell** checkbox in a session's header (off by default) plays a short two-note sound when the
+selected session needs you: its turn ended, it asks for a permission, or it failed. It rings only while the
+browser tab is in the background, and only for the session you have open; opening a session never rings for
+what it already holds. The sound is made in the browser (no audio file), and the choice is remembered in
+that browser.
 
 ## Uploading files
 
@@ -704,6 +717,7 @@ Keycloak user without the access role.
 | `POST /sessions/{id}/restart` `{"secrets": {"NAME": "value"}}` | Starts a failed session's agent again in its container and resumes its task, with the session's secrets given again (only names it has). Owner or admin only; 409 if the session is not failed or its container is gone |
 | `PUT /sessions/{id}/sharing` `{"users": ["bob", "carol"]}` | Shares the session with exactly these users (`[]`: nobody else), and records a `shared` event. Owner or admin only (403 for users it is shared with); at most 50 names |
 | `PUT /sessions/{id}/secrets` `{"secrets": {"NAME": "value"}}` | Replaces the values of secrets the session was created with, in the running container, runs the image's setup again, and records a `secrets_refreshed` event. Owner or admin only (403 for users it is shared with); 400 for a secret the session does not have, 409 if the session is not open |
+| `PUT /sessions/{id}/userprofile` (no body) | Writes updated user profile files into `/home/bob` of the running container (re-read from `~/.bobcrew/user-profile/` by the UI), replacing any file already there, and records a `user_profile_refreshed` event. Owner or admin only (403 for users it is shared with); 409 if the session is not open |
 | `GET /sessions/{id}/file?path=<path>` | Downloads a regular file from the session's workspace; `path` is relative to `/opt/workspace` or absolute inside it, `file://` allowed (403 if downloads are disabled) |
 | `PUT /sessions/{id}/files?path=<path>` (the file as the body) | Writes a file into the workspace, creating directories and replacing a file there; `path` as for downloads. Answers 201 `{"path", "size"}`; 400 for a path outside the workspace, a link or a directory, 413 if too large, 403 if uploads are disabled |
 | `GET /sessions/{id}/metrics` | A snapshot of the container: `state`, `startedAt`, `uptimeSeconds`, `cpuPercent` (100 = one core), `memoryUsageBytes`, `memoryLimitBytes`, `pids`, `networkRxBytes`, `networkTxBytes`, `blockReadBytes`, `blockWriteBytes`. Docker samples for a second or two |
@@ -725,13 +739,14 @@ sends `{"title", "role", "repository", "capabilities", "resources"}`, and the se
 `X-BobCrew-Missing-Secrets` lists the secrets the file does not have; the page may not send `image`, `env`,
 `secrets`, `apiKey` or `userProfile` itself). It rewrites `PUT /api/sessions/{id}/secrets` too: the page sends
 nothing, and the server receives the values the secrets file has now for the session's secrets (the same header
-lists those it lacks). Uploads are streamed through it; other request
+lists those it lacks). It also rewrites `PUT /api/sessions/{id}/userprofile`: the page sends nothing, and the
+server receives the files from `~/.bobcrew/user-profile/` (the same files sent at session creation). Uploads are streamed through it; other request
 bodies are limited to 2 MB.
 
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,
 `permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here; `data.workspaceWiped` says whether the files went too), `file_uploaded` (`user` uploaded `data.path`, `data.size` bytes), `repository_cloned` (`data.url`, `data.branch`, `data.path`), `shared` (`user` shared the session with
-`data.users`, the whole new list), `secrets_refreshed` (`user` replaced the values of the secrets `data.names`), `resumed` (`user` started the agent again: `data.from` is `crash` or `archive`). The server keeps the last 5000 events of a
+`data.users`, the whole new list), `secrets_refreshed` (`user` replaced the values of the secrets `data.names`), `user_profile_refreshed` (`user` re-sent `data.count` user profile files), `resumed` (`user` started the agent again: `data.from` is `crash` or `archive`). The server keeps the last 5000 events of a
 session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss nothing.
 
 ## Not in this version

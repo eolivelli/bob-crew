@@ -5,6 +5,12 @@
 
 const $ = (id) => document.getElementById(id);
 
+const BELL_KEY = 'bobcrew.bell';
+
+function readBellPreference() {
+  try { return localStorage.getItem(BELL_KEY) === '1'; } catch (e) { return false; }
+}
+
 const state = {
   user: '',             // who this UI is signed in as
   loginNeeded: false,   // the UI logs its user in with an identity provider, and nobody is logged in
@@ -23,9 +29,13 @@ const state = {
   permissions: new Map(),
   streaming: null,      // {kind, body}: the message that chunks are appended to
   plan: null,           // the plan card of the current turn
+  bellEnabled: readBellPreference(), // ring when the agent needs the user and the tab is in the background
+  bellBaseline: null,   // the selected session's last event number before the page listened to it
+  selection: 0,         // counts selections, so that a late answer for an earlier one is dropped
   status: null,         // the selected session's status
   inTurn: false,        // a prompt turn is open (between user_prompt and turn_end)
   workAfterTurn: false, // the agent went on working after its turn ended, so STOP stays usable
+  eventTime: null,      // when the event being rendered happened; the boxes it adds carry it as their tooltip
 };
 
 /** Update kinds that mean the agent is doing something, as opposed to reporting its mode or commands. */
@@ -286,6 +296,7 @@ function setStatus(status) {
   $('session-mode').disabled = !open;
   const session = currentSession();
   $('refresh-secrets').disabled = !open || !(session && session.secrets && session.secrets.length);
+  $('refresh-user-profile').disabled = !open;
 }
 
 // ---- one session --------------------------------------------------------
@@ -318,6 +329,22 @@ function select(id, serverName) {
   if (session) showHeader(session);
   refreshSessions();
 
+  openEvents(id, server);
+}
+
+// Opens the event stream of the selected session. The stream starts at the beginning, so what the session already
+// holds is replayed; the bell must stay silent for it, hence the baseline: the session's last sequence number
+// before listening (null when it cannot be read, which keeps the bell silent for this stream).
+async function openEvents(id, server) {
+  const selection = ++state.selection;
+  state.source = null;
+  state.bellBaseline = null;
+  try {
+    const info = await api('GET', sessionApi());
+    if (info && Number.isFinite(info.lastSeq)) state.bellBaseline = info.lastSeq;
+  } catch (e) { /* no bell for this stream */ }
+  if (state.selection !== selection) return; // another session was selected meanwhile
+
   // On a reconnect the browser sends Last-Event-ID, so the server resumes where we were.
   const eventPath = server ? `/api/servers/${encodeURIComponent(server)}/sessions/${encodeURIComponent(id)}/events?after=0`
       : `/api/sessions/${encodeURIComponent(id)}/events?after=0`;
@@ -328,14 +355,20 @@ function select(id, serverName) {
     const event = JSON.parse(message.data);
     state.events.push(event);
     render(event);
+    if (shouldRing(event, state.bellEnabled, document.hidden, state.bellBaseline)) playBell();
   };
   source.addEventListener('end', () => {
     source.close();
+    state.eventTime = null;
     add(el('div', 'divider', 'session ended'));
   });
 }
 
 function add(node) {
+  if (state.eventTime) {
+    node.dataset.time = state.eventTime;
+    node.title = timeTitle(state.eventTime, Date.now());
+  }
   $('transcript').append(node);
   node.scrollIntoView({ block: 'end' });
 }
@@ -382,6 +415,7 @@ function cardText(card) {
 
 function render(event) {
   const data = event.data || {};
+  state.eventTime = event.time || null;
   switch (event.type) {
     case 'user_prompt':
       state.streaming = null;
@@ -444,6 +478,11 @@ function render(event) {
       state.workAfterTurn = false;
       add(el('div', 'divider', resumedText(event)));
       break;
+    case 'user_profile_refreshed': {
+      const count = event.data && event.data.count != null ? event.data.count : '?';
+      add(el('div', 'divider', `${event.user || 'someone'} refreshed the user profile (${count} file(s))`));
+      break;
+    }
     case 'shared':
       add(el('div', 'divider', sharedEventText(event)));
       refreshSessions();
@@ -590,6 +629,12 @@ function resolvePermission(event) {
   card.append(el('div', 'result', data.optionId ? `Answered (${data.optionId})${who}` : `Cancelled${who}`));
 }
 
+// Boxes show when they happened as a tooltip; the age in it is worked out when the pointer arrives, so it is current.
+$('transcript').addEventListener('mouseover', (over) => {
+  const box = over.target instanceof Element ? over.target.closest('[data-time]') : null;
+  if (box) box.title = timeTitle(box.dataset.time, Date.now());
+});
+
 // ---- actions ------------------------------------------------------------
 
 $('notice').addEventListener('click', () => { $('notice').hidden = true; });
@@ -665,6 +710,14 @@ $('prompt').addEventListener('keydown', (key) => {
   if (key.key === 'Enter' && !key.shiftKey && !key.isComposing) {
     key.preventDefault();
     sendPrompt();
+  } else if (key.key === 'ArrowUp' && !key.shiftKey && !key.ctrlKey && !key.altKey && !key.metaKey && !key.isComposing
+      && $('prompt').value === '') {
+    // an empty box: bring back this user's last prompt, to send again or to change
+    const last = lastPromptOf(state.events, state.user);
+    if (last !== null) {
+      key.preventDefault();
+      $('prompt').value = last;
+    }
   }
 });
 
@@ -678,6 +731,22 @@ $('session-mode').addEventListener('change', async (change) => {
   } catch (e) {
     notify(e.message);
     refreshSessions();
+  }
+});
+
+// The attention bell: off until the user switches it on, and then remembered in this browser.
+$('bell-toggle').checked = state.bellEnabled;
+$('bell-toggle').addEventListener('change', (change) => {
+  state.bellEnabled = change.target.checked;
+  try {
+    if (state.bellEnabled) localStorage.setItem(BELL_KEY, '1');
+    else localStorage.removeItem(BELL_KEY);
+  } catch (e) { /* storage not allowed: the choice lasts until the page is closed */ }
+  if (state.bellEnabled) {
+    // the click is the user gesture that lets the browser play sounds; ring once so the user knows what to expect
+    const ready = prepareBell();
+    if (ready) ready.then(playBell, () => notify('The browser did not allow the bell to sound'));
+    else notify('This browser cannot play the bell');
   }
 });
 
@@ -937,6 +1006,20 @@ $('refresh-all-secrets').addEventListener('click', async () => {
   notify(`Refreshed the secrets of ${mine.length - failed.length} of your ${mine.length} open sessions.`
     + (missing.size ? ` Not in ~/.bobcrew/secrets.json, left as they were: ${[...missing].join(', ')}.` : '')
     + (failed.length ? ` Failed: ${failed.join('; ')}` : ''));
+});
+
+$('refresh-user-profile').addEventListener('click', async () => {
+  const session = currentSession();
+  if (!session) return;
+  const button = $('refresh-user-profile');
+  button.disabled = true;
+  try {
+    await api('PUT', sessionPath(session, '/userprofile'));
+  } catch (e) {
+    notify(e.message);
+  } finally {
+    setStatus(state.status);
+  }
 });
 
 $('close').addEventListener('click', () => {

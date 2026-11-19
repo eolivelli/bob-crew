@@ -88,6 +88,9 @@ class ProxyController {
         }
     }
 
+    /** Refreshing user profile files, which this app fills in from the user-profile directory. */
+    private static final Pattern USER_PROFILE_PATH = Pattern.compile("/api/sessions/[^/]+/userprofile");
+
     /** Creating a session waits for the server to clone the role's repository, which can take minutes. */
     private static final Duration CREATE_TIMEOUT = Duration.ofMinutes(15);
 
@@ -195,6 +198,7 @@ class ProxyController {
                 : request.getMethod().equals("POST") && RESTART_PATH.matcher(forwardedPath).matches() ? Filled.RESTART
                 : request.getMethod().equals("POST") && RESUME_PATH.matcher(forwardedPath).matches() ? Filled.RESUME
                 : null;
+        boolean profileRefresh = request.getMethod().equals("PUT") && USER_PROFILE_PATH.matcher(forwardedPath).matches();
         List<String> missingSecrets = new ArrayList<>();
         HttpRequest.BodyPublisher publisher;
         if (upload) {
@@ -220,6 +224,12 @@ class ProxyController {
                     return;
                 }
                 body = made.get();
+            } else if (profileRefresh) {
+                Optional<byte[]> profile = fillUserProfile(body, response);
+                if (profile.isEmpty()) {
+                    return;
+                }
+                body = profile.get();
             }
             publisher = body.length == 0 ? HttpRequest.BodyPublishers.noBody()
                     : HttpRequest.BodyPublishers.ofByteArray(body);
@@ -235,7 +245,7 @@ class ProxyController {
         }
         for (String name : FORWARDED_REQUEST_HEADERS) {
             String value = request.getHeader(name);
-            if (filled != null && name.equals("Content-Type")) {
+            if ((filled != null || profileRefresh) && name.equals("Content-Type")) {
                 // the body is this app's, whatever the browser said of its own (empty) one
                 value = "application/json";
             }
@@ -564,6 +574,47 @@ class ProxyController {
             case RESUME -> "Resuming";
         }, passed.propertyNames(), missingSecrets, request.has("apiKey") ? ", its own API key" : "");
         return Optional.of(json.writeValueAsBytes(request));
+    }
+
+    /**
+     * Makes the body of a request to refresh a session's user profile files: a JSON array of
+     * {@code {"path": ..., "contentBase64": ..., "executable": ...}} objects, loaded fresh from the
+     * user-profile directory. The browser sends no body.
+     * @return the body to forward, or empty if an error was sent instead
+     */
+    private Optional<byte[]> fillUserProfile(byte[] body, HttpServletResponse response) throws IOException {
+        try {
+            JsonNode sent = body.length == 0 ? json.createObjectNode() : json.readTree(body);
+            if (!(sent instanceof ObjectNode) || !sent.isEmpty()) {
+                sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+                        "The user profile files come from this UI's user-profile directory; send no body");
+                return Optional.empty();
+            }
+        } catch (JacksonException e) {
+            sendError(response, HttpServletResponse.SC_BAD_REQUEST, "The request is not valid JSON");
+            return Optional.empty();
+        }
+        List<ProfileFile> files;
+        try {
+            files = userProfile.load();
+        } catch (IllegalStateException e) {
+            sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+            return Optional.empty();
+        }
+        if (files.isEmpty()) {
+            sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+                    "The user-profile directory is empty or does not exist; nothing to refresh");
+            return Optional.empty();
+        }
+        log.info("Refreshing the user profile of a session ({} file(s))", files.size());
+        ArrayNode array = json.createArrayNode();
+        for (ProfileFile file : files) {
+            ObjectNode node = array.addObject();
+            node.put("path", file.path());
+            node.put("contentBase64", file.contentBase64());
+            node.put("executable", file.executable());
+        }
+        return Optional.of(json.writeValueAsBytes(array));
     }
 
     /** The server refused the token: the user logs in again, or the configured token is to be replaced. */

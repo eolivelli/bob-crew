@@ -67,6 +67,18 @@
                         </configuration>
                     </execution>
                     <execution>
+                        <id>js-test-bell</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <arguments>
+                                <argument>${project.basedir}/src/test/js/bell.test.js</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <id>js-test-transcript-export</id>
                         <phase>test</phase>
                         <goals>

@@ -78,10 +78,12 @@
       <select id="session-mode" class="live-only" title="Mode"></select>
       <button id="upload" type="button" class="live-only" title="Put files from this computer into the session's workspace (or drop them on the conversation)">Upload files</button>
       <button id="metrics-toggle" type="button" class="live-only" title="CPU, memory and I/O of the session's container">Metrics</button>
+      <label id="bell" title="Play a sound when the agent needs you (a turn ended, a permission is asked, an error) while this tab is in the background"><input id="bell-toggle" type="checkbox"> Bell</label>
       <button id="export" type="button" title="Download the whole session as a gzipped HTML file">Export transcript</button>
       <button id="cancel" type="button" class="live-only">Stop</button>
       <button id="clear" type="button" class="danger live-only" title="Start the conversation over, optionally deleting the workspace's files; the session stays open">Clear</button>
       <button id="refresh-secrets" type="button" class="live-only" title="Replace this session's secrets with the values now in ~/.bobcrew/secrets.json, for example after replacing an expired GitHub token (owner only)">Refresh secrets</button>
+      <button id="refresh-user-profile" type="button" class="live-only" title="Re-send the files in ~/.bobcrew/user-profile to this session, for example after updating an AWS credentials file (owner only)">Refresh user profile</button>
       <button id="share" type="button" class="live-only" title="Choose who else may use this session (owner only)">Share</button>
       <button id="restart" type="button" class="live-only" hidden
         title="Start this session's agent again in its container and go on with its conversation; the workspace is as it was (owner or admin only)">Restart</button>
@@ -176,6 +178,7 @@
   </form>
 </main>
 <script src="links.js"></script>
+<script src="bell.js"></script>
 <script src="transcript-export.js"></script>
 <script src="app.js"></script>
 </body>

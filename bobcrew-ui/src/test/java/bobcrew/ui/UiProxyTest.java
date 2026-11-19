@@ -205,6 +205,16 @@ class UiProxyTest {
     }
 
     @Test
+    void servesTheAttentionBell() throws Exception {
+        // the decision to ring is checked by src/test/js/bell.test.js
+        assertThat(get("/").body()).contains("id=\"bell-toggle\"").contains("src=\"bell.js\"")
+            .doesNotContain("id=\"bell-toggle\" checked");
+        HttpResponse<String> script = get("/bell.js");
+        assertThat(script.statusCode()).isEqualTo(200);
+        assertThat(script.body()).contains("function shouldRing").doesNotContain(TOKEN);
+    }
+
+    @Test
     void servesThePageWithTheRoleControls() throws Exception {
         // the behaviour is in app.js and is checked by hand; here only that the page offers it
         assertThat(get("/").body()).contains("id=\"new-role\"").contains("id=\"show-roles\"").contains("id=\"roles-view\"");

@@ -18,6 +18,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * may use the session; {@code data.users} is the new list) or {@code secrets_refreshed} (a user replaced the
  * values of the secrets {@code data.names}) or {@code resumed} (a user started the session's agent again:
  * {@code data.from} is {@code crash}, after it stopped unexpectedly, or {@code archive}, from the session's archive)
+ * or {@code user_profile_refreshed} (a user re-sent the user profile files; {@code data.count} is the number of
+ * files written)
  * @param user who caused it, for events caused by a user
  * @param data the details, depending on the type
  */
@@ -50,4 +52,6 @@ public record UiEvent(long seq, Instant time, String type, String user, Object d
 
     /** The session's agent was started again and went on with its task: {@code data.from} is crash or archive. */
     public static final String RESUMED = "resumed";
+
+    public static final String USER_PROFILE_REFRESHED = "user_profile_refreshed";
 }

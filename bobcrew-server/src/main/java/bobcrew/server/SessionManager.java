@@ -490,6 +490,18 @@ public class SessionManager {
         return session.info();
     }
 
+    /**
+     * Writes updated user profile files into the running container. Only the session's owner or an admin may.
+     * @param files already validated profile files (from the UI's user-profile directory)
+     * @throws ApiException 400 if there are no files, 403 if the user may not, 404 as {@link #get}, 409 if
+     * the session is not open
+     */
+    AgentSession.Info refreshUserProfile(Caller caller, String id, List<ProfileFile> files) {
+        AgentSession session = getToManage(caller, id, "refresh its user profile");
+        session.refreshUserProfile(caller.name(), checkUserProfile(files));
+        return session.info();
+    }
+
     List<AgentSession.Info> list(Caller caller) {
         return sessions.values()
             .stream()
