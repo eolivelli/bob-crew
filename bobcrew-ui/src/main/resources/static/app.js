@@ -15,6 +15,8 @@ const state = {
   uploading: false,     // an upload is in progress
   sessions: [],
   current: null,        // id of the selected session
+  archives: [],         // archived sessions the user may read, with the server each is on
+  archive: null,        // the archived session shown instead of a live one, or null
   source: null,         // its EventSource
   events: [],           // every event received for it, for the transcript export
   toolCalls: new Map(), // toolCallId -> card elements
@@ -287,16 +289,12 @@ function setStatus(status) {
 
 // ---- one session --------------------------------------------------------
 
-function select(id, serverName) {
+// Empties the transcript and forgets the session shown, live or archived.
+function resetView() {
   hideRoles();
   hideMetrics();
   if (state.source) state.source.close();
-  state.current = id;
-  const session = state.sessions.find((s) => s.id === id && (!serverName || s.server === serverName))
-      || state.sessions.find((s) => s.id === id);
-  const server = serverName || (session ? session.server : null);
-  const hashKey = server ? `${server}:${id}` : id;
-  history.replaceState(null, '', '#' + hashKey);
+  state.source = null;
   state.events = [];
   state.toolCalls.clear();
   state.permissions.clear();
@@ -305,6 +303,17 @@ function select(id, serverName) {
   state.inTurn = false;
   state.workAfterTurn = false;
   $('transcript').replaceChildren();
+}
+
+function select(id, serverName) {
+  resetView();
+  leaveArchive();
+  state.current = id;
+  const session = state.sessions.find((s) => s.id === id && (!serverName || s.server === serverName))
+      || state.sessions.find((s) => s.id === id);
+  const server = serverName || (session ? session.server : null);
+  const hashKey = server ? `${server}:${id}` : id;
+  history.replaceState(null, '', '#' + hashKey);
   if (session) showHeader(session);
   refreshSessions();
 
@@ -665,7 +674,7 @@ $('session-mode').addEventListener('change', async (change) => {
 });
 
 $('export').addEventListener('click', async () => {
-  const session = currentSession();
+  const session = state.archive || currentSession();
   if (!session) return;
   if (!state.events.length) {
     notify('Nothing to export yet.');
@@ -922,22 +931,141 @@ $('refresh-all-secrets').addEventListener('click', async () => {
     + (failed.length ? ` Failed: ${failed.join('; ')}` : ''));
 });
 
-$('close').addEventListener('click', async () => {
-  if (!state.current || !window.confirm('Close this session and stop its agent?')) return;
+$('close').addEventListener('click', () => {
+  if (!currentSession()) return;
+  const dialog = $('close-dialog');
+  dialog.returnValue = 'cancel';
+  dialog.showModal();
+});
+
+$('close-dialog').addEventListener('close', async () => {
+  const choice = $('close-dialog').returnValue;
+  const session = currentSession();
+  if ((choice !== 'close' && choice !== 'archive') || !session) return;
+  const keep = choice === 'archive';
   try {
-    await api('DELETE', sessionApi());
-    if (state.source) state.source.close();
-    hideMetrics();
-    state.current = null;
-    history.replaceState(null, '', '#');
-    $('session-header').hidden = true;
-    $('prompt-form').hidden = true;
-    $('transcript').replaceChildren(el('p', '', 'Session closed.'));
-    refreshSessions();
+    await api('DELETE', sessionApi(keep ? '?archive=true' : ''));
   } catch (e) {
-    notify(e.message);
+    notify(e.message); // the session is still open
+    return;
+  }
+  resetView();
+  state.current = null;
+  history.replaceState(null, '', '#');
+  $('session-header').hidden = true;
+  $('prompt-form').hidden = true;
+  $('transcript').replaceChildren(el('p', '', keep ? 'Session closed and archived.' : 'Session closed.'));
+  refreshSessions();
+  if (keep) {
+    await refreshArchives();
+    $('archived').open = true;
+    const archived = state.archives.find((a) => a.id === session.id && a.server === session.server);
+    if (archived) showArchive(archived);
   }
 });
+
+// ---- archived sessions (read-only) -----------------------------------------
+// Closing a session can keep its transcript on its server. The page lists those the user may read, shows one as
+// the live transcript would be (from the same events, all at once), exports it, and deletes it.
+
+function archiveApi(archived, subPath) {
+  const base = archived.server ? `/servers/${encodeURIComponent(archived.server)}/archives` : '/archives';
+  return `${base}/${encodeURIComponent(archived.id)}${subPath || ''}`;
+}
+
+async function refreshArchives() {
+  // tagged with their server's name as sessions are, so that they are reached through it the same way
+  const servers = state.servers.length ? state.servers.map((s) => s.name) : [''];
+  const lists = await Promise.all(servers.map(async (server) => {
+    try {
+      const res = await api('GET', server ? `/servers/${encodeURIComponent(server)}/archives` : '/archives');
+      return (res || []).map((a) => ({ ...a, server }));
+    } catch (e) {
+      return [];
+    }
+  }));
+  state.archives = lists.flat();
+  const list = $('archives');
+  if (!state.archives.length) {
+    list.replaceChildren(el('li', 'empty', 'None. Choose "Close and archive" when closing a session to keep it here.'));
+    return;
+  }
+  list.replaceChildren();
+  let group = null;
+  for (const archived of state.archives) {
+    if (state.servers.length > 1 && archived.server !== group) {
+      group = archived.server;
+      list.append(el('li', 'server-group-header', group));
+    }
+    const selected = state.archive && state.archive.id === archived.id && state.archive.server === archived.server;
+    const item = el('li', selected ? 'selected' : '');
+    item.append(el('span', 'name', archived.title || archived.id),
+      el('span', 'sub', `${formatWhen(archived.archivedAt)} · ${archived.owner}`));
+    item.title = `Archived by ${archived.archivedBy}; ${archived.eventCount} events`;
+    item.addEventListener('click', () => showArchive(archived));
+    list.append(item);
+  }
+}
+
+function formatWhen(time) {
+  const date = new Date(time);
+  return Number.isNaN(date.getTime()) ? String(time) : date.toLocaleString();
+}
+
+async function showArchive(archived) {
+  let events;
+  try {
+    events = await api('GET', archiveApi(archived, '/events'));
+  } catch (e) {
+    notify(e.message);
+    refreshArchives();
+    return;
+  }
+  resetView();
+  state.current = null;
+  state.archive = archived;
+  history.replaceState(null, '', '#');
+  document.querySelector('main').classList.add('archived-view');
+  showHeader(archived);
+  $('session-meta').textContent += ` · archived ${formatWhen(archived.archivedAt)} by ${archived.archivedBy}`;
+  for (const event of events || []) {
+    state.events.push(event);
+    render(event);
+  }
+  // nothing in it can be answered or sent any more
+  for (const options of $('transcript').querySelectorAll('.card.permission .options')) options.remove();
+  const badge = $('session-status');
+  badge.textContent = 'archived';
+  badge.className = 'badge archived';
+  $('prompt-form').hidden = true;
+  $('delete-archive').disabled = !(archived.owner === state.user || $('admin-badge').hidden === false);
+  refreshSessions();
+  refreshArchives();
+}
+
+function leaveArchive() {
+  state.archive = null;
+  document.querySelector('main').classList.remove('archived-view');
+}
+
+$('delete-archive').addEventListener('click', async () => {
+  const archived = state.archive;
+  if (!archived || !window.confirm(`Delete the archived session "${archived.title || archived.id}"? Its transcript `
+      + 'is gone for good (export it first to keep a copy).')) return;
+  try {
+    await api('DELETE', archiveApi(archived));
+  } catch (e) {
+    notify(e.message);
+    return;
+  }
+  resetView();
+  leaveArchive();
+  $('session-header').hidden = true;
+  $('transcript').replaceChildren(el('p', '', 'Archived session deleted.'));
+  refreshArchives();
+});
+
+$('archived').addEventListener('toggle', () => { if ($('archived').open) refreshArchives(); });
 
 // manifests can be added while the page is open; look again when the user starts a new session
 $('new-title').addEventListener('focus', () => refreshRoles());
@@ -1040,6 +1168,7 @@ $('hide-roles').addEventListener('click', () => hideRoles());
   if (state.loginNeeded) return;
   refreshRoles();
   refreshServerLimits();
+  refreshArchives();
   await refreshSessions();
   const linked = location.hash.slice(1);
   if (linked) {

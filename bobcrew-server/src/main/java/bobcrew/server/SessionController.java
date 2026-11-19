@@ -1,6 +1,7 @@
 package bobcrew.server;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -23,6 +24,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /** The HTTP API. The caller ({@link Caller}) comes from the request's token. */
@@ -206,10 +208,37 @@ class SessionController {
         return sessions.refreshSecrets(caller, id, request.secrets());
     }
 
+    /** Closes the session; with {@code ?archive=true} its transcript is kept, to read later under /archives. */
     @DeleteMapping("/sessions/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    void close(@PathVariable String id, Caller caller) {
-        sessions.close(caller, id);
+    void close(@PathVariable String id, @RequestParam(defaultValue = "false") boolean archive, Caller caller) {
+        sessions.close(caller, id, archive);
+    }
+
+    @GetMapping("/archives")
+    List<JsonNode> archives(Caller caller) {
+        return sessions.archived(caller);
+    }
+
+    @GetMapping("/archives/{id}")
+    JsonNode archive(@PathVariable String id, Caller caller) {
+        return sessions.archived(caller, id);
+    }
+
+    /** The archived session's events, all at once: a JSON array of what the event stream sent. */
+    @GetMapping("/archives/{id}/events")
+    void archivedEvents(@PathVariable String id, Caller caller, HttpServletResponse response) throws IOException {
+        try (InputStream events = sessions.archivedEvents(caller, id)) {
+            response.setContentType("application/json");
+            response.setHeader("Cache-Control", "no-store");
+            events.transferTo(response.getOutputStream());
+        }
+    }
+
+    @DeleteMapping("/archives/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    void deleteArchive(@PathVariable String id, Caller caller) {
+        sessions.deleteArchived(caller, id);
     }
 
     @PostMapping("/sessions/{id}/prompt")

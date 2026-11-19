@@ -24,4 +24,17 @@ class SessionAccessPolicy {
     boolean canManage(Caller caller, AgentSession session) {
         return session.owner().equals(caller.name()) || caller.admin();
     }
+
+    /**
+     * Whether {@code caller} may read an archived session's transcript: those who could use the session when it
+     * was archived (its owner, the users it was shared with then) and admins.
+     */
+    boolean canRead(Caller caller, SessionArchive.Entry archived) {
+        return canDelete(caller, archived) || archived.sharedWith().contains(caller.name());
+    }
+
+    /** Whether {@code caller} may delete an archived session: its owner and admins, as for closing it. */
+    boolean canDelete(Caller caller, SessionArchive.Entry archived) {
+        return archived.owner().equals(caller.name()) || caller.admin();
+    }
 }

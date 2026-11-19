@@ -1,5 +1,6 @@
 package bobcrew.server;
 
+import java.io.InputStream;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -23,6 +24,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import tools.jackson.databind.JsonNode;
 
 /**
  * The sessions of this server, all in memory: they end with the server, as their containers do. This is
@@ -61,10 +63,14 @@ public class SessionManager {
 
     private final AllowedImages allowedImages;
 
-    SessionManager(BobCrewProperties properties, DockerRuntime docker, SessionAccessPolicy accessPolicy) {
+    private final SessionArchive archive;
+
+    SessionManager(BobCrewProperties properties, DockerRuntime docker, SessionAccessPolicy accessPolicy,
+            SessionArchive archive) {
         this.properties = properties;
         this.docker = docker;
         this.accessPolicy = accessPolicy;
+        this.archive = archive;
         this.allowedImages = new AllowedImages(properties.docker().allowedImages(), docker.defaultImage());
         log.info("Agent: {}", properties.agent());
     }
@@ -399,12 +405,75 @@ public class SessionManager {
             .toList();
     }
 
-    /** Closes the session, removes its container and forgets it. Only its owner or an admin may. */
-    void close(Caller caller, String id) {
-        AgentSession session = getToManage(caller, id, "close it");
+    /**
+     * Closes the session, removes its container and forgets it, keeping its transcript in the archive first if
+     * asked to. Only its owner or an admin may.
+     * @throws ApiException 409 if the owner keeps as many archived sessions as they may, 500 if the archive
+     * cannot be written; the session stays open in both cases
+     */
+    void close(Caller caller, String id, boolean keep) {
+        AgentSession session = getToManage(caller, id, keep ? "archive it" : "close it");
+        if (keep) {
+            int most = properties.archive().maxPerUser();
+            if (most > 0 && archive.countOwnedBy(session.owner()) >= most) {
+                throw new ApiException(HttpStatus.CONFLICT, "There are already " + most + " archived sessions of "
+                        + session.owner() + ", the most this server keeps for one user; delete some first");
+            }
+            // once before closing, so that a disk that refuses leaves the session open rather than gone
+            archive.write(session.info(), session.events().snapshot(), caller.name());
+        }
         session.close();
         sessions.remove(id);
-        log.info("Session {} closed by {}", id, caller.name());
+        if (keep) {
+            // and again with everything up to the end; if this fails, the first copy stays
+            try {
+                archive.write(session.info(), session.events().snapshot(), caller.name());
+            } catch (ApiException e) {
+                log.warn("Session {}: its archive lacks the events of its last moments", id);
+            }
+        }
+        log.info("Session {} {} by {}", id, keep ? "closed and archived" : "closed", caller.name());
+    }
+
+    /** The archived sessions the caller may read, newest first: their details as when they closed. */
+    List<JsonNode> archived(Caller caller) {
+        return archive.list().stream()
+            .filter(entry -> accessPolicy.canRead(caller, entry))
+            .map(entry -> (JsonNode) entry.details())
+            .toList();
+    }
+
+    /**
+     * One archived session's details.
+     * @throws ApiException 404 if there is none or the caller may not read it, as for open sessions
+     */
+    JsonNode archived(Caller caller, String id) {
+        return readable(caller, id).details();
+    }
+
+    /** One archived session's events, a JSON array; the caller closes the stream. 404 as {@link #archived}. */
+    InputStream archivedEvents(Caller caller, String id) {
+        return archive.openEvents(readable(caller, id).id());
+    }
+
+    /**
+     * Deletes an archived session for good. Only its owner or an admin may.
+     * @throws ApiException 403 for users it was shared with, 404 as {@link #archived}
+     */
+    void deleteArchived(Caller caller, String id) {
+        SessionArchive.Entry entry = readable(caller, id);
+        if (!accessPolicy.canDelete(caller, entry)) {
+            throw new ApiException(HttpStatus.FORBIDDEN,
+                    "Only the owner of this archived session, or an admin, may delete it");
+        }
+        archive.delete(entry.id());
+        log.info("Archived session {} deleted by {}", id, caller.name());
+    }
+
+    private SessionArchive.Entry readable(Caller caller, String id) {
+        return archive.find(id)
+            .filter(entry -> accessPolicy.canRead(caller, entry))
+            .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "No such archived session"));
     }
 
     /**

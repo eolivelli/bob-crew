@@ -42,6 +42,12 @@ bobcrew:
   # written by the session's (non-root) user, so they can only go where the agent itself can write.
   file-uploads-enabled: ${BOBCREW_FILE_UPLOADS_ENABLED:true}
   max-upload-size: ${BOBCREW_MAX_UPLOAD_SIZE:200MB}
+  archive:
+    # Where sessions closed with "archive" keep their transcript (details and events, not the workspace), one
+    # directory each, readable by the server's user only. Relative to the server's working directory.
+    dir: ${BOBCREW_ARCHIVE_DIR:archive}
+    # Most archived sessions one user may keep (0: no limit); they delete old ones to archive more
+    max-per-user: ${BOBCREW_MAX_ARCHIVES_PER_USER:100}
   agent:
     # The command run in each session's container (the image's entrypoint runs it). It must speak
     # ACP on stdin/stdout. --auto-approve is deliberately absent: users answer permission requests.

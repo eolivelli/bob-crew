@@ -396,6 +396,22 @@ These are ordinary files, not [secrets](#roles): they stay on the container's di
 and by anyone who can use the session. A `settings.xml` with passwords in it is handed to whoever you share
 the session with.
 
+## Archiving a session
+
+**Close session** asks whether to archive it. **Close and archive** stops the agent and removes its container
+as closing always does, but keeps the transcript on the server: the session's details and its events (the last
+`bobcrew.event-buffer-size`, 5000 by default), not the workspace's files. Archived sessions are listed under
+**Archived sessions** at the bottom of the sidebar; selecting one shows its transcript as it was, read-only, with
+**Export transcript** and **Delete archive** (which removes it from the server for good).
+
+An archived session can be read by those who could use it when it was closed (its owner, the users it was shared
+with then) and by admins; only its owner or an admin can delete it. Each user may keep
+`BOBCREW_MAX_ARCHIVES_PER_USER` of them (100 by default); beyond that, closing with archive is refused, and the
+session stays open, until they delete some. Archives are files on the server, under `BOBCREW_ARCHIVE_DIR`
+(`archive` in its working directory, so `~/bobcrew/archive` for a server deployed with `deploy-remote.sh`): one
+directory per session, named by its id, with `info.json` and `events.json`. They survive restarts and can be
+backed up, or removed by hand.
+
 ## Exporting a session
 
 Each message, tool call and plan in a session has a **Copy** button beside it (it shows when the pointer is on
@@ -518,6 +534,8 @@ Set as environment variables, or as the Spring properties in
 | `BOBCREW_MAX_MEMORY`, `BOBCREW_MAX_CPUS` | `0` (no cap) | The most a session may ask for |
 | `BOBCREW_CEILING_MEMORY`, `BOBCREW_CEILING_CPUS` | the Docker host's | The most a user's own limits from Keycloak can give a session |
 | `BOBCREW_PIDS_LIMIT` | `4096` | Most processes per container (`0`: no limit) |
+| `BOBCREW_ARCHIVE_DIR` | `archive` | Where [archived sessions](#archiving-a-session) are kept, relative to the server's working directory |
+| `BOBCREW_MAX_ARCHIVES_PER_USER` | `100` | Most archived sessions one user may keep (`0`: no limit) |
 
 Further properties: `bobcrew.max-sessions` (8), `bobcrew.request-timeout` (30s),
 `bobcrew.prompt-timeout` (`BOBCREW_PROMPT_TIMEOUT`; none by default: a turn lasts until it ends or someone
@@ -600,6 +618,10 @@ Notes on Bob:
   (or an admin) can replace the values of a running session's secrets, the same way and with the same care:
   the agent runs as the same user by then, so each file is written under a fresh temporary name and renamed
   over whatever is at its place, never through a link the agent left there.
+- **Archives**: transcripts kept on the server's disk hold whatever the agent printed (a secret it was asked to
+  show, for one), so they are the server's user's alone (directories 700, files 600), and readable through the API
+  only by those who could use the session, as above. An id from a request names a file only if it is a session id
+  the server could have made (a UUID, as it writes them); other directories and symbolic links are ignored.
 - **File downloads**: the path must stay inside `/opt/workspace`, and only regular files are served, so
   a symbolic link cannot lead elsewhere in the container.
 - **File uploads**: the path must stay inside `/opt/workspace`; the file is written by the session's
@@ -639,7 +661,11 @@ Keycloak user without the access role.
 | `GET /sessions` | The sessions the caller may use: their own, those shared with them (all of them for an admin) |
 | `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "secrets": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}, "userProfile": [{"path": ".gitconfig", "contentBase64": "...", "executable": false}], "apiKey": "..."}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). `secrets` become files in `/run/bobcrew/secrets`, `env` environment variables, `apiKey` the Bob API key of this session's agent in place of the server's ([API keys](#api-keys)), `userProfile` files under `/home/bob` ([User profile files](#user-profile-files)). 400 if the image is not on the server, a variable, secret or user profile file is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the user's cap; 403 for a capability the user may not use |
 | `GET /sessions/{id}` | One session: `id`, `owner`, `sharedWith`, `title`, `image`, `containerId`, `secrets` (names), `ownApiKey` (whether it runs with a key of its own rather than the server's), `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
-| `DELETE /sessions/{id}` | Closes it and removes its container. Owner or admin only (403 for users it is shared with) |
+| `DELETE /sessions/{id}` | Closes it and removes its container; with `?archive=true` its details and events are kept first ([Archiving](#archiving-a-session)). Owner or admin only (403 for users it is shared with); with `archive`, 409 when the owner keeps as many archived sessions as they may, and the session stays open |
+| `GET /archives` | The archived sessions the caller may read, newest first: each session's details as when it closed, plus `archivedAt`, `archivedBy` and `eventCount` |
+| `GET /archives/{id}` | One of them (404 if there is none or the caller may not read it) |
+| `GET /archives/{id}/events` | Its events, a JSON array of what the event stream sent |
+| `DELETE /archives/{id}` | Deletes it for good. Owner or admin only (403 for users it was shared with) |
 | `PUT /sessions/{id}/sharing` `{"users": ["bob", "carol"]}` | Shares the session with exactly these users (`[]`: nobody else), and records a `shared` event. Owner or admin only (403 for users it is shared with); at most 50 names |
 | `PUT /sessions/{id}/secrets` `{"secrets": {"NAME": "value"}}` | Replaces the values of secrets the session was created with, in the running container, runs the image's setup again, and records a `secrets_refreshed` event. Owner or admin only (403 for users it is shared with); 400 for a secret the session does not have, 409 if the session is not open |
 | `GET /sessions/{id}/file?path=<path>` | Downloads a regular file from the session's workspace; `path` is relative to `/opt/workspace` or absolute inside it, `file://` allowed (403 if downloads are disabled) |

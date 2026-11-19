@@ -87,10 +87,11 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `GitRepository` | A repository to clone into a new session: checks the URL (allowed schemes, no credentials) and branch, and names the clone's directory. |
 | `ContainerAcpTransport` | The SDK's `AcpClientTransport` over a container's attach streams. The one class of ours with Reactor types, because the SDK interface has them. |
 | `ContainerMetrics` | The metrics record (`GET /sessions/{id}/metrics`). |
-| `EventLog` | A session's numbered events with replay; one queue per subscriber. |
+| `EventLog` | A session's numbered events with replay; one queue per subscriber. `snapshot()` is what an archive keeps. |
+| `SessionArchive` | Closed sessions kept to read later (`DELETE /sessions/{id}?archive=true`): a directory per session under `bobcrew.archive.dir` with `info.json` (its `Info`, plus `archivedAt`, `archivedBy`, `eventCount`) and `events.json`, each written to a temporary file and renamed. No database, like the rest. |
 | `UiEvent` | The event record clients receive, and the event type names. |
 | `ContainerPaths` | Turns a client-supplied file path into a path inside `/opt/workspace` of the container. The only place that does. |
-| `SessionAccessPolicy` | Who may use a session (owner, users it is shared with, admins) and who may close or re-share it (owner, admins). Decide access here and nowhere else. |
+| `SessionAccessPolicy` | Who may use a session (owner, users it is shared with, admins) and who may close or re-share it (owner, admins); who may read an archived one (the same, as it was shared when closed) and delete it (owner, admins). Decide access here and nowhere else. |
 | `SecurityConfig` | JWT validation, per issuer (`JwtIssuerAuthenticationManagerResolver`): `issue-token`'s HS256 (signature, expiry, issuer, audience, subject, revocation list) and Keycloak's (its keys, fetched on first use; expiry, issuer, audience, user name). Every endpoint needs the `CallerAuthentication.USE` authority; its absence answers 403 with a message. |
 | `Tokens`, `IssueTokenCommand` | Secret loading and the `issue-token` command line. |
 | `BobCrewProperties` | All `bobcrew.*` settings. Defaults live here and in `application.yml`; keep the two in step. |
@@ -230,6 +231,8 @@ the maintainer.
   File downloads serve regular files only, never what a symbolic link points to.
   Uploads are written by an exec running as the session's user, never through Docker's archive API
   (which writes as root and follows links anywhere in the container).
+  On the server's own disk, the only path made from request data is an archived session's directory, and
+  `SessionArchive` uses an id only once it reads back as the same UUID text, ignoring symbolic links.
 - Repository URLs and branches go through `GitRepository.of`, and reach `git` as separate arguments after
   `--`, never through a shell. URLs with credentials are refused: the URL shows in logs, events and the
   session's details.
@@ -251,7 +254,9 @@ the maintainer.
 - A session is its owner's: other users see it only once it is shared with them, and only the owner or an admin
   closes or re-shares it. Every endpoint reaches a session through `SessionManager` with the caller's name, which
   asks `SessionAccessPolicy`; a session the caller may not use answers 404, never 403, so that its existence does
-  not leak. Anything long-lived (the event stream) checks access again as it goes.
+  not leak. Anything long-lived (the event stream) checks access again as it goes. Archived sessions follow the
+  same rules (404 for those the caller may not read), and their files are the server's user's alone (700/600):
+  a transcript holds whatever the agent printed.
 - The server has no cookies and no CORS headers. Adding either creates a CSRF surface that does
   not exist today.
 - The UI app binds to `127.0.0.1` and acts with its one user's token or login; `LocalOnlyFilter` (Host, Origin,

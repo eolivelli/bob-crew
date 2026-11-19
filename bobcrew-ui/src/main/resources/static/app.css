@@ -77,7 +77,7 @@ a.button {
   display: inline-block; padding: 6px 14px; border-radius: 6px; text-decoration: none;
   background: var(--accent); color: var(--accent-text);
 }
-body.logged-out #new-session, body.logged-out #show-roles, body.logged-out #refresh-all-secrets, body.logged-out #sessions,
+body.logged-out #new-session, body.logged-out #show-roles, body.logged-out #refresh-all-secrets, body.logged-out #sessions, body.logged-out #archived,
 body.logged-out main > :not(#login-view) { display: none !important; }
 
 #new-session { display: grid; gap: 6px; padding: 10px 16px 14px; border-bottom: 1px solid var(--border); }
@@ -103,6 +103,23 @@ body.logged-out main > :not(#login-view) { display: none !important; }
 #sessions li.selected { background: var(--user); }
 #sessions .name { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #sessions .sub { display: block; color: var(--muted); font-size: 12px; }
+#archived { padding: 0 6px 6px; border-top: 1px solid var(--border); }
+#archived summary { padding: 8px 10px 4px; color: var(--muted); font-size: 13px; cursor: pointer; }
+#archives { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow-y: auto; }
+#archives li { padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+#archives li:hover { background: var(--bg); }
+#archives li.selected { background: var(--user); }
+#archives li.empty { cursor: default; color: var(--muted); font-size: 12px; }
+#archives li.empty:hover { background: none; }
+#archives .name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#archives .sub { display: block; color: var(--muted); font-size: 12px; }
+#archives .server-group-header { cursor: default; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+
+/* an archived session is read-only: only what makes sense for a transcript */
+.archive-only { display: none; }
+main.archived-view .archive-only { display: revert; }
+main.archived-view .live-only { display: none; }
+
 #sessions .server-group-header {
   font-size: 11px;
   font-weight: 700;
@@ -225,14 +242,14 @@ button.active { border-color: var(--accent); color: var(--accent); }
 #role-dialog dd { margin: 0; overflow-wrap: anywhere; }
 #role-dialog pre { max-height: 40vh; margin: 0 0 12px; padding: 10px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 #role-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
-#upload-dialog, #clear-dialog, #role-dialog {
+#upload-dialog, #clear-dialog, #close-dialog, #role-dialog {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
   max-width: 480px;
 }
-#clear-dialog::backdrop, #upload-dialog::backdrop, #role-dialog::backdrop { background: rgb(0 0 0 / 40%); }
+#clear-dialog::backdrop, #close-dialog::backdrop, #upload-dialog::backdrop, #role-dialog::backdrop { background: rgb(0 0 0 / 40%); }
 #upload-dialog label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
 #upload-dialog input { font: inherit; color: var(--text); }
 #upload-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
@@ -242,4 +259,8 @@ button.active { border-color: var(--accent); color: var(--accent); }
 #clear-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
 #clear-dialog button[value=keep] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 #clear-dialog button.danger { color: var(--bad); }
+#close-dialog .hint { color: var(--muted); font-size: 13px; }
+#close-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
+#close-dialog button[value=archive] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+#close-dialog button.danger { color: var(--bad); }
 .dialog-buttons { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }

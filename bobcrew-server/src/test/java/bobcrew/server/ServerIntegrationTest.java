@@ -94,6 +94,7 @@ class ServerIntegrationTest {
         registry.add("bobcrew.max-upload-size", () -> "1MB");
         registry.add("bobcrew.docker.max-memory", () -> "1GB");
         registry.add("bobcrew.docker.max-cpus", () -> "2");
+        registry.add("bobcrew.archive.max-per-user", () -> "1");
     }
 
     @LocalServerPort
@@ -464,6 +465,81 @@ class ServerIntegrationTest {
         assertThat(String.join(" ", container.getConfig().getEnv())).as("docker inspect shows no secret")
             .doesNotContain("a-token");
         assertThat(container.getHostConfig().getTmpFs()).containsKey(DockerRuntime.SECRETS_DIR);
+    }
+
+    @Test
+    void aClosedSessionIsArchivedForItsUsersToReadLater() throws Exception {
+        JsonNode session = createSession("to keep");
+        String id = session.get("id").asString();
+        assertThat(ask(id, "hello archive")).contains("hello archive");
+        assertThat(send("PUT", "/sessions/" + id + "/sharing", "{\"users\":[\"bob\"]}", alice).statusCode())
+            .isEqualTo(200);
+        String bob = token("bob");
+        String carol = token("carol");
+        assertThat(send("DELETE", "/sessions/" + id + "?archive=true", null, bob).statusCode())
+            .as("only those who may close it archive it").isEqualTo(403);
+
+        assertThat(send("DELETE", "/sessions/" + id + "?archive=true", null, alice).statusCode()).isEqualTo(204);
+        assertThat(send("GET", "/sessions/" + id, null, alice).statusCode()).as("closed").isEqualTo(404);
+
+        JsonNode listed = JSON.readTree(send("GET", "/archives", null, alice).body());
+        assertThat(listed).hasSize(1);
+        JsonNode archived = listed.get(0);
+        assertThat(archived.get("id").asString()).isEqualTo(id);
+        assertThat(archived.get("title").asString()).isEqualTo("to keep");
+        assertThat(archived.get("owner").asString()).isEqualTo("alice");
+        assertThat(archived.get("archivedBy").asString()).isEqualTo("alice");
+        assertThat(archived.get("status").asString()).isEqualTo("CLOSED");
+        assertThat(JSON.readTree(send("GET", "/archives/" + id, null, alice).body())).isEqualTo(archived);
+
+        HttpResponse<String> events = send("GET", "/archives/" + id + "/events", null, alice);
+        assertThat(events.statusCode()).isEqualTo(200);
+        assertThat(events.headers().firstValue("Content-Type").orElse("")).startsWith("application/json");
+        JsonNode parsed = JSON.readTree(events.body());
+        assertThat(parsed.size()).isEqualTo(archived.get("eventCount").asInt());
+        assertThat(parsed.get(0).get("seq").asLong()).as("from the start").isEqualTo(1);
+        assertThat(events.body()).contains("\"user_prompt\"").contains("hello archive")
+            .as("up to the end").contains("\"status\":\"CLOSED\"");
+
+        // users it was shared with read it; nobody else learns it exists
+        assertThat(JSON.readTree(send("GET", "/archives", null, bob).body())).hasSize(1);
+        assertThat(send("GET", "/archives/" + id + "/events", null, bob).statusCode()).isEqualTo(200);
+        assertThat(JSON.readTree(send("GET", "/archives", null, carol).body())).isEmpty();
+        for (String path : List.of("/archives/" + id, "/archives/" + id + "/events")) {
+            assertThat(send("GET", path, null, carol).statusCode()).as(path).isEqualTo(404);
+        }
+        assertThat(send("DELETE", "/archives/" + id, null, carol).statusCode()).isEqualTo(404);
+        assertThat(send("DELETE", "/archives/" + id, null, bob).statusCode()).as("only the owner or an admin")
+            .isEqualTo(403);
+        for (String bad : List.of("not-a-session", id.toUpperCase(), "..x")) {
+            assertThat(send("GET", "/archives/" + bad, null, alice).statusCode()).as(bad).isEqualTo(404);
+        }
+
+        // on disk, the server's user's alone, and without the API key
+        Path directory = TestDocker.ARCHIVES.resolve(instanceId).resolve(id);
+        assertThat(Files.getPosixFilePermissions(directory))
+            .isEqualTo(java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        for (String file : List.of("info.json", "events.json")) {
+            assertThat(Files.getPosixFilePermissions(directory.resolve(file))).as(file)
+                .isEqualTo(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+            assertThat(Files.readString(directory.resolve(file))).as(file).doesNotContain(API_KEY);
+        }
+
+        // this server keeps one per user: a second one is refused, and its session stays open
+        String second = createSession("second").get("id").asString();
+        HttpResponse<String> full = send("DELETE", "/sessions/" + second + "?archive=true", null, alice);
+        assertThat(full.statusCode()).isEqualTo(409);
+        assertThat(full.body()).contains("delete some first");
+        assertThat(send("GET", "/sessions/" + second, null, alice).statusCode()).isEqualTo(200);
+
+        // the owner deletes it, and the files go
+        assertThat(send("DELETE", "/archives/" + id, null, alice).statusCode()).isEqualTo(204);
+        assertThat(send("GET", "/archives/" + id, null, alice).statusCode()).isEqualTo(404);
+        assertThat(directory).doesNotExist();
+
+        // closing without archiving keeps nothing
+        assertThat(send("DELETE", "/sessions/" + second, null, alice).statusCode()).isEqualTo(204);
+        assertThat(JSON.readTree(send("GET", "/archives", null, alice).body())).isEmpty();
     }
 
     @Test

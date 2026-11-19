@@ -62,6 +62,11 @@ final class EventLog {
         events.clear();
     }
 
+    /** The kept events, oldest first: what a client connecting now would be sent. */
+    synchronized List<UiEvent> snapshot() {
+        return List.copyOf(events);
+    }
+
     synchronized long lastSeq() {
         return lastSeq;
     }

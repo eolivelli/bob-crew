@@ -26,7 +26,16 @@ public record BobCrewProperties(
         List<String> allowedCapabilities,
         List<String> adminUsers,
         @DefaultValue Auth auth,
-        @DefaultValue Limits limits) {
+        @DefaultValue Limits limits,
+        @DefaultValue Archive archive) {
+
+    /** Where closed sessions are kept when their users archive them ({@link SessionArchive}). */
+    public record Archive(
+            /* relative to the server's working directory, like certs/ */
+            @DefaultValue("archive") String dir,
+            /* most archived sessions one user may keep; 0 for no limit */
+            @DefaultValue("100") int maxPerUser) {
+    }
 
     /** What runs inside a session's container. */
     public record Agent(

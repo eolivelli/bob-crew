@@ -61,6 +61,10 @@
   <button id="show-roles" type="button" title="List the available roles and read their manifests">Roles</button>
   <button id="refresh-all-secrets" type="button" title="Send the values now in ~/.bobcrew/secrets.json to all your open sessions, for example after replacing an expired GitHub token">Refresh secrets in my sessions</button>
   <ul id="sessions"></ul>
+  <details id="archived">
+    <summary>Archived sessions</summary>
+    <ul id="archives"></ul>
+  </details>
 </aside>
 
 <main>
@@ -71,15 +75,17 @@
     </div>
     <div class="controls">
       <span id="session-status" class="badge"></span>
-      <select id="session-mode" title="Mode"></select>
-      <button id="upload" type="button" title="Put files from this computer into the session's workspace (or drop them on the conversation)">Upload files</button>
-      <button id="metrics-toggle" type="button" title="CPU, memory and I/O of the session's container">Metrics</button>
+      <select id="session-mode" class="live-only" title="Mode"></select>
+      <button id="upload" type="button" class="live-only" title="Put files from this computer into the session's workspace (or drop them on the conversation)">Upload files</button>
+      <button id="metrics-toggle" type="button" class="live-only" title="CPU, memory and I/O of the session's container">Metrics</button>
       <button id="export" type="button" title="Download the whole session as a gzipped HTML file">Export transcript</button>
-      <button id="cancel" type="button">Stop</button>
-      <button id="clear" type="button" class="danger" title="Start the conversation over, optionally deleting the workspace's files; the session stays open">Clear</button>
-      <button id="refresh-secrets" type="button" title="Replace this session's secrets with the values now in ~/.bobcrew/secrets.json, for example after replacing an expired GitHub token (owner only)">Refresh secrets</button>
-      <button id="share" type="button" title="Choose who else may use this session (owner only)">Share</button>
-      <button id="close" type="button" class="danger">Close session</button>
+      <button id="cancel" type="button" class="live-only">Stop</button>
+      <button id="clear" type="button" class="danger live-only" title="Start the conversation over, optionally deleting the workspace's files; the session stays open">Clear</button>
+      <button id="refresh-secrets" type="button" class="live-only" title="Replace this session's secrets with the values now in ~/.bobcrew/secrets.json, for example after replacing an expired GitHub token (owner only)">Refresh secrets</button>
+      <button id="share" type="button" class="live-only" title="Choose who else may use this session (owner only)">Share</button>
+      <button id="close" type="button" class="danger live-only">Close session</button>
+      <button id="delete-archive" type="button" class="danger archive-only"
+        title="Delete this archived session from the server, for good (owner or admin only)">Delete archive</button>
     </div>
   </header>
   <section id="metrics" hidden>
@@ -103,6 +109,18 @@
       <div class="dialog-buttons">
         <button value="keep" type="submit">Clear conversation, keep files</button>
         <button value="wipe" class="danger" type="submit">Clear and delete workspace files</button>
+        <button value="cancel" type="submit" class="plain">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="close-dialog">
+    <form method="dialog">
+      <p>Close this session? Its agent stops, and its container and workspace files are deleted.</p>
+      <p class="hint">Archiving keeps its transcript on the server, under <b>Archived sessions</b>, for you and
+        those it is shared with to read later. Files in the workspace are not kept.</p>
+      <div class="dialog-buttons">
+        <button value="archive" type="submit">Close and archive</button>
+        <button value="close" class="danger" type="submit">Close without archiving</button>
         <button value="cancel" type="submit" class="plain">Cancel</button>
       </div>
     </form>

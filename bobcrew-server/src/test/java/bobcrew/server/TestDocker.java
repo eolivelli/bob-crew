@@ -33,6 +33,9 @@ final class TestDocker implements ExecutionCondition {
     static final String IMAGE = "bobcrew-fake-agent:test";
 
     /** A bare repository inside the image, with branches {@code main} and {@code feature}. */
+    /** Where the tests' servers archive sessions, a directory per server instance (made when first used). */
+    static final Path ARCHIVES = Path.of(System.getProperty("java.io.tmpdir"), "bobcrew-test-archives");
+
     static final String SAMPLE_REPOSITORY = "file:///opt/test-repos/sample.git";
 
     private static final String HOST = System.getenv().getOrDefault("DOCKER_HOST", "unix:///var/run/docker.sock");
@@ -138,6 +141,8 @@ final class TestDocker implements ExecutionCondition {
         registry.add("bobcrew.agent.command[2]", () -> "/opt/fake-agent.jar");
         // the image's own repository, /opt/test-repos/sample.git, is reached with file://
         registry.add("bobcrew.git.allowed-schemes", () -> "https,file");
+        // never the module's own directory
+        registry.add("bobcrew.archive.dir", () -> ARCHIVES.resolve(instanceId).toString());
         return instanceId;
     }
 }
