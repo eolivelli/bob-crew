@@ -134,6 +134,8 @@ class UiProxyTest {
             respond(exchange, 200, "application/json", "{\"id\":\"with-secrets\",\"secrets\":[\"GH_TOKEN\",\"NOT_SET_HERE\"]}");
         } else if (exchange.getRequestMethod().equals("GET") && path.equals("/api/sessions/only-missing")) {
             respond(exchange, 200, "application/json", "{\"id\":\"only-missing\",\"secrets\":[\"NOT_SET_HERE\"]}");
+        } else if (exchange.getRequestMethod().equals("GET") && path.equals("/api/archives/archived")) {
+            respond(exchange, 200, "application/json", "{\"id\":\"archived\",\"secrets\":[\"GH_TOKEN\",\"NOT_SET_HERE\"]}");
         } else if (exchange.getRequestMethod().equals("GET") && path.equals("/api/sessions/no-secrets")) {
             respond(exchange, 200, "application/json", "{\"id\":\"no-secrets\",\"secrets\":[]}");
         } else {
@@ -391,6 +393,44 @@ class UiProxyTest {
                 .doesNotContain("secret-gh-token");
         } finally {
             Files.setPosixFilePermissions(secretsFile, PosixFilePermissions.fromString("rw-------"));
+        }
+    }
+
+    @Test
+    void restartsAndResumesWithTheSecretsFilesValues() throws Exception {
+        String before = Files.readString(secretsFile);
+        Files.writeString(userProfileDir.resolve(".resume-profile"), "from the profile");
+        try {
+            // a restart: the session's secrets again, nothing else
+            HttpResponse<String> restarted = post("/api/sessions/with-secrets/restart", "");
+            assertThat(restarted.statusCode()).as(restarted.body()).isEqualTo(200);
+            assertThat(restarted.body()).contains("\"uri\":\"/api/sessions/with-secrets/restart\"")
+                .contains("\"contentType\":\"application/json\"")
+                .contains("\"body\":{\"secrets\":{\"GH_TOKEN\":\"secret-gh-token\"}}");
+            assertThat(restarted.headers().firstValue(ProxyController.MISSING_SECRETS_HEADER)).hasValue("NOT_SET_HERE");
+            // a session without secrets restarts with none, and needs no file
+            assertThat(post("/api/sessions/no-secrets/restart", "").body()).contains("\"body\":{\"secrets\":{}}");
+
+            // a resume: also the API key and the user profile files, as for a new session
+            Files.writeString(secretsFile, "{\"GH_TOKEN\": \"secret-gh-token\", \"BOB_API_KEY\": \"my-own-bob-key\"}");
+            HttpResponse<String> resumed = post("/api/servers/localhost/archives/archived/resume", "");
+            assertThat(resumed.statusCode()).as(resumed.body()).isEqualTo(200);
+            assertThat(resumed.body()).contains("\"uri\":\"/api/archives/archived/resume\"")
+                .contains("\"secrets\":{\"GH_TOKEN\":\"secret-gh-token\"},\"apiKey\":\"my-own-bob-key\"")
+                .contains("\"path\":\".resume-profile\"");
+
+            // the page sends no values of its own
+            for (String path : new String[] {"/api/sessions/with-secrets/restart", "/api/archives/archived/resume"}) {
+                for (String body : new String[] {"{\"secrets\":{\"GH_TOKEN\":\"x\"}}", "{\"apiKey\":\"x\"}", "[]"}) {
+                    HttpResponse<String> refused = post(path, body);
+                    assertThat(refused.statusCode()).as(path + " " + body).isEqualTo(400);
+                    assertThat(refused.body()).as(body).doesNotContain("\"method\"").doesNotContain("secret-gh-token");
+                }
+            }
+            assertThat(post("/api/sessions/gone/restart", "").statusCode()).isEqualTo(404);
+        } finally {
+            Files.writeString(secretsFile, before);
+            Files.delete(userProfileDir.resolve(".resume-profile"));
         }
     }
 

@@ -42,11 +42,11 @@ class SessionArchiveTest {
         String newer = UUID.randomUUID().toString();
         SessionArchive archive = new SessionArchive(root.resolve("archive"), JSON);
         assertThat(archive.list()).as("no directory yet").isEmpty();
-        archive.write(info(older, "alice", List.of("bob")), events(), "alice");
+        archive.write(info(older, "alice", List.of("bob")), events(), "alice", Map.of("version", 1, "tasks", List.of()));
         Thread.sleep(5);
-        archive.write(info(newer, "carol", List.of()), events(), "admin");
-        // written again, as when a session closes: replaced, not doubled
-        archive.write(info(newer, "carol", List.of()), events(), "admin");
+        archive.write(info(newer, "carol", List.of()), events(), "admin", Map.of("version", 1));
+        // written again, as when a session closes: replaced, not doubled; without the agent's record, none is left
+        archive.write(info(newer, "carol", List.of()), events(), "admin", null);
 
         SessionArchive reopened = new SessionArchive(root.resolve("archive"), JSON);
         List<SessionArchive.Entry> entries = reopened.list();
@@ -56,6 +56,13 @@ class SessionArchiveTest {
         assertThat(entry.sharedWith()).containsExactly("bob");
         assertThat(entry.details().get("eventCount").asInt()).isEqualTo(2);
         assertThat(entry.details().get("secrets").toString()).isEqualTo("[\"GH_TOKEN\"]");
+        assertThat(entry.details().get("resumable").asBoolean()).isTrue();
+        assertThat(reopened.readAgentTask(older)).isEqualTo(Map.of("version", 1, "tasks", List.of()));
+        assertThat(Files.getPosixFilePermissions(root.resolve("archive").resolve(older).resolve("agent.json")))
+            .isEqualTo(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+        assertThat(reopened.readEvents(older)).extracting(UiEvent::seq).containsExactly(1L, 2L);
+        assertThat(reopened.find(newer).orElseThrow().details().get("resumable").asBoolean()).isFalse();
+        assertThat(reopened.readAgentTask(newer)).isNull();
         try (InputStream in = reopened.openEvents(older)) {
             JsonNode read = JSON.readTree(in.readAllBytes());
             assertThat(read.get(0).get("data").get("text").asString()).isEqualTo("hi");
@@ -77,7 +84,7 @@ class SessionArchiveTest {
     void readsOnlyDirectoriesNamedAsSessions() throws Exception {
         SessionArchive archive = new SessionArchive(root, JSON);
         String id = UUID.randomUUID().toString();
-        archive.write(info(id, "alice", List.of()), events(), "alice");
+        archive.write(info(id, "alice", List.of()), events(), "alice", null);
         // a copy under another name, a link to it, and a file whose id says another session
         Path copy = Files.createDirectory(root.resolve("not-a-session"));
         Files.copy(root.resolve(id).resolve("info.json"), copy.resolve("info.json"));

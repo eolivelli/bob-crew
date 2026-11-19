@@ -356,6 +356,16 @@ class DockerRuntime implements Closeable {
         client.startContainerCmd(containerId).exec();
     }
 
+    /** Whether the container is still there (running or not). */
+    boolean exists(String containerId) {
+        try {
+            client.inspectContainerCmd(containerId).exec();
+            return true;
+        } catch (NotFoundException e) {
+            return false;
+        }
+    }
+
     /** The container's exit code, or null if it is still running or gone. */
     Long exitCode(String containerId) {
         try {

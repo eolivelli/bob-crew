@@ -52,6 +52,9 @@ class SessionArchive {
 
     private static final String EVENTS = "events.json";
 
+    /** The agent's own record of the task (Bob's {@code _bob/task/export}), when it gave one: what resuming needs. */
+    private static final String AGENT = "agent.json";
+
     /** What a listing needs of an archived session, read from its {@code info.json}. */
     record Entry(String id, String owner, Set<String> sharedWith, Instant archivedAt, ObjectNode details) {
     }
@@ -77,15 +80,21 @@ class SessionArchive {
      * @param by who archived it
      * @throws ApiException 500 if the files cannot be written
      */
-    void write(AgentSession.Info session, List<UiEvent> events, String by) {
+    void write(AgentSession.Info session, List<UiEvent> events, String by, Object agentTask) {
         ObjectNode details = json.valueToTree(session);
         details.put("archivedAt", Instant.now().toString());
         details.put("archivedBy", by);
         details.put("eventCount", events.size());
+        details.put("resumable", agentTask != null);
         try {
             Path directory = privateDirectory(privateDirectory(root).resolve(session.id()));
             // events first: an info.json is there only once its events are
             replace(directory, EVENTS, json.writeValueAsBytes(events));
+            if (agentTask != null) {
+                replace(directory, AGENT, json.writeValueAsBytes(agentTask));
+            } else {
+                Files.deleteIfExists(directory.resolve(AGENT));
+            }
             replace(directory, INFO, json.writeValueAsBytes(details));
         } catch (IOException | UncheckedIOException e) {
             log.error("Session {}: cannot write its archive in {}: {}", session.id(), root, e.toString());
@@ -144,6 +153,33 @@ class SessionArchive {
             return Files.newInputStream(file(id, EVENTS).orElseThrow(() -> gone()));
         } catch (IOException e) {
             throw gone();
+        }
+    }
+
+    /**
+     * The archived session's events, to go on from when it is resumed.
+     * @throws ApiException 404 if they are gone, 500 if they cannot be read
+     */
+    List<UiEvent> readEvents(String id) {
+        try (InputStream in = openEvents(id)) {
+            return List.of(json.readValue(in, UiEvent[].class));
+        } catch (IOException | JacksonException e) {
+            log.error("Archive {}: cannot read {}: {}", id, EVENTS, e.toString());
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "The archived session's events cannot be read");
+        }
+    }
+
+    /** The agent's record of the task, as plain JSON values, or null if the archive has none. */
+    Object readAgentTask(String id) {
+        Optional<Path> file = file(id, AGENT);
+        if (file.isEmpty()) {
+            return null;
+        }
+        try {
+            return json.readValue(Files.readAllBytes(file.get()), Object.class);
+        } catch (IOException | JacksonException e) {
+            log.error("Archive {}: cannot read {}: {}", id, AGENT, e.toString());
+            return null;
         }
     }
 

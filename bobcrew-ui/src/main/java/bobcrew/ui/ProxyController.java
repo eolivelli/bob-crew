@@ -66,6 +66,28 @@ class ProxyController {
     /** Replacing the values of a session's secrets, which this app fills in from the secrets file. */
     private static final Pattern SECRETS_PATH = Pattern.compile("/api/sessions/[^/]+/secrets");
 
+    /** Starting a failed session's agent again: its secrets are written again, from the secrets file. */
+    private static final Pattern RESTART_PATH = Pattern.compile("/api/sessions/[^/]+/restart");
+
+    /** Resuming an archived session: secrets, API key and user profile files, as for a new session. */
+    private static final Pattern RESUME_PATH = Pattern.compile("/api/archives/[^/]+/resume");
+
+    /** The requests whose body this app makes from its own files, and what each takes. */
+    private enum Filled {
+        /** {@code PUT .../sessions/{id}/secrets}: the session's secrets, at least one. */
+        REFRESH("/secrets"),
+        /** {@code POST .../sessions/{id}/restart}: the session's secrets, any of them. */
+        RESTART("/restart"),
+        /** {@code POST .../archives/{id}/resume}: the archive's secrets, the API key and the user profile files. */
+        RESUME("/resume");
+
+        final String suffix;
+
+        Filled(String suffix) {
+            this.suffix = suffix;
+        }
+    }
+
     /** Creating a session waits for the server to clone the role's repository, which can take minutes. */
     private static final Duration CREATE_TIMEOUT = Duration.ofMinutes(15);
 
@@ -169,7 +191,10 @@ class ProxyController {
 
         boolean upload = request.getMethod().equals("PUT") && UPLOAD_PATH.matcher(forwardedPath).matches();
         boolean create = request.getMethod().equals("POST") && forwardedPath.equals("/api/sessions");
-        boolean refresh = request.getMethod().equals("PUT") && SECRETS_PATH.matcher(forwardedPath).matches();
+        Filled filled = request.getMethod().equals("PUT") && SECRETS_PATH.matcher(forwardedPath).matches() ? Filled.REFRESH
+                : request.getMethod().equals("POST") && RESTART_PATH.matcher(forwardedPath).matches() ? Filled.RESTART
+                : request.getMethod().equals("POST") && RESUME_PATH.matcher(forwardedPath).matches() ? Filled.RESUME
+                : null;
         List<String> missingSecrets = new ArrayList<>();
         HttpRequest.BodyPublisher publisher;
         if (upload) {
@@ -189,12 +214,12 @@ class ProxyController {
                     return;
                 }
                 body = expanded.get();
-            } else if (refresh) {
-                Optional<byte[]> filled = fillSecrets(server, token, forwardedPath, body, missingSecrets, response);
-                if (filled.isEmpty()) {
+            } else if (filled != null) {
+                Optional<byte[]> made = fillSecrets(filled, server, token, forwardedPath, body, missingSecrets, response);
+                if (made.isEmpty()) {
                     return;
                 }
-                body = filled.get();
+                body = made.get();
             }
             publisher = body.length == 0 ? HttpRequest.BodyPublishers.noBody()
                     : HttpRequest.BodyPublishers.ofByteArray(body);
@@ -204,11 +229,13 @@ class ProxyController {
             .method(request.getMethod(), publisher)
             .header("Authorization", "Bearer " + token);
         if (!stream) {
-            forwarded.timeout(upload ? UPLOAD_TIMEOUT : create ? CREATE_TIMEOUT : Duration.ofSeconds(120));
+            // a restart or a resume starts an agent, and a resume clones the repository again
+            forwarded.timeout(upload ? UPLOAD_TIMEOUT : create || filled == Filled.RESTART || filled == Filled.RESUME
+                    ? CREATE_TIMEOUT : Duration.ofSeconds(120));
         }
         for (String name : FORWARDED_REQUEST_HEADERS) {
             String value = request.getHeader(name);
-            if (refresh && name.equals("Content-Type")) {
+            if (filled != null && name.equals("Content-Type")) {
                 // the body is this app's, whatever the browser said of its own (empty) one
                 value = "application/json";
             }
@@ -428,14 +455,15 @@ class ProxyController {
     }
 
     /**
-     * Makes the body of a request to replace a session's secrets: {@code {"secrets": {...}}} with the values the
-     * secrets file has now for the secrets the session was created with, whose names the server is asked for.
-     * Those the file does not have are left as they are in the session, and added to {@code missingSecrets}
-     * (names only). The browser sends no values, as when a session is created.
+     * Makes the body of a request that gives a session its secrets again: {@code {"secrets": {...}}} with the values
+     * the secrets file has now for the secrets the session (or the archived one) has, whose names the server is
+     * asked for. Those the file does not have are left out and added to {@code missingSecrets} (names only). For a
+     * resume, the API key and the user profile files are added too, as for a new session. The browser sends no
+     * values, as when a session is created.
      * @return the body to forward, or empty if an error was sent instead
      */
-    private Optional<byte[]> fillSecrets(ServerConnection server, String token, String forwardedPath, byte[] body,
-            List<String> missingSecrets, HttpServletResponse response) throws IOException {
+    private Optional<byte[]> fillSecrets(Filled kind, ServerConnection server, String token, String forwardedPath,
+            byte[] body, List<String> missingSecrets, HttpServletResponse response) throws IOException {
         try {
             JsonNode sent = body.length == 0 ? json.createObjectNode() : json.readTree(body);
             if (!(sent instanceof ObjectNode) || !sent.isEmpty()) {
@@ -447,7 +475,7 @@ class ProxyController {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST, "The request is not valid JSON");
             return Optional.empty();
         }
-        String sessionPath = forwardedPath.substring(0, forwardedPath.length() - "/secrets".length());
+        String sessionPath = forwardedPath.substring(0, forwardedPath.length() - kind.suffix.length());
         HttpResponse<byte[]> session;
         try {
             session = server.client().send(HttpRequest.newBuilder(URI.create(server.baseUri() + sessionPath))
@@ -480,14 +508,14 @@ class ProxyController {
         }
         List<String> names = new ArrayList<>();
         info.path("secrets").valueStream().forEach(name -> names.add(name.asString("")));
-        if (names.isEmpty()) {
+        if (names.isEmpty() && kind == Filled.REFRESH) {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST,
                     "This session was created without secrets, so there is nothing to refresh");
             return Optional.empty();
         }
         Map<String, String> available;
         try {
-            available = secrets.load();
+            available = names.isEmpty() && kind == Filled.RESTART ? Map.of() : secrets.load();
         } catch (IllegalStateException e) {
             sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
             return Optional.empty();
@@ -501,15 +529,40 @@ class ProxyController {
                 passed.put(name, value);
             }
         }
-        if (passed.isEmpty()) {
+        if (passed.isEmpty() && kind == Filled.REFRESH) {
             sendError(response, HttpServletResponse.SC_BAD_REQUEST, "None of the session's secrets ("
                     + String.join(", ", names) + ") is in the secrets file, so nothing was refreshed");
             return Optional.empty();
         }
-        log.info("Refreshing the secrets {} of a session (not in the secrets file: {})", passed.propertyNames(),
-                missingSecrets);
         ObjectNode request = json.createObjectNode();
         request.set("secrets", passed);
+        if (kind == Filled.RESUME) {
+            String apiKey = available.get(SecretStore.API_KEY);
+            if (apiKey != null && !apiKey.isBlank()) {
+                request.put("apiKey", apiKey);
+            }
+            List<ProfileFile> profileFiles;
+            try {
+                profileFiles = userProfile.load();
+            } catch (IllegalStateException e) {
+                sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+                return Optional.empty();
+            }
+            if (!profileFiles.isEmpty()) {
+                ArrayNode profileArray = request.putArray("userProfile");
+                for (ProfileFile file : profileFiles) {
+                    ObjectNode fileNode = profileArray.addObject();
+                    fileNode.put("path", file.path());
+                    fileNode.put("contentBase64", file.contentBase64());
+                    fileNode.put("executable", file.executable());
+                }
+            }
+        }
+        log.info("{} a session with the secrets {} (not in the secrets file: {}){}", switch (kind) {
+            case REFRESH -> "Refreshing";
+            case RESTART -> "Restarting";
+            case RESUME -> "Resuming";
+        }, passed.propertyNames(), missingSecrets, request.has("apiKey") ? ", its own API key" : "");
         return Optional.of(json.writeValueAsBytes(request));
     }
 

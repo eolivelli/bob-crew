@@ -109,24 +109,7 @@ public class SessionManager {
                 checkedCapabilities, resources),
                 repository, checkedSecrets, checkedUserProfile, title == null || title.isBlank() ? chosenImage : title.strip(), checkedApiKey,
                 docker, properties);
-        synchronized (this) {
-            if (stopping) {
-                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "The server is shutting down");
-            }
-            long active = sessions.values().stream().filter(SessionManager::isActive).count();
-            if (active >= properties.maxSessions()) {
-                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "The server already runs "
-                        + properties.maxSessions() + " sessions; close one first");
-            }
-            int perUser = caller.limits().maxSessions();
-            if (perUser > 0 && sessions.values().stream()
-                .filter(other -> isActive(other) && owner.equals(other.owner()))
-                .count() >= perUser) {
-                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "You already have " + perUser
-                        + " open sessions, the most you may have on this server; close one first");
-            }
-            sessions.put(session.id(), session);
-        }
+        admit(session, caller, null);
         try {
             session.start();
         } catch (RuntimeException e) {
@@ -142,6 +125,117 @@ public class SessionManager {
                         + ", memory " + (resources.memoryBytes() == null ? "unlimited" : resources.memoryBytes() + " bytes")
                         + ", cpus " + (resources.cpus() == null ? "unlimited" : resources.cpus()));
         return session;
+    }
+
+    /**
+     * Counts the session in, within the server's and its owner's limits. {@code replacing}, if not null, is a
+     * session of the same id that it takes the place of (a restart), and does not count.
+     * @throws ApiException 409 if another session has its id, 429 when full, 503 when shutting down
+     */
+    private synchronized void admit(AgentSession session, Caller caller, AgentSession replacing) {
+        if (stopping) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "The server is shutting down");
+        }
+        AgentSession present = sessions.get(session.id());
+        if (present != null && present != replacing) {
+            throw new ApiException(HttpStatus.CONFLICT, "The session is open already");
+        }
+        long active = sessions.values().stream().filter(other -> other != replacing && isActive(other)).count();
+        if (active >= properties.maxSessions()) {
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "The server already runs "
+                    + properties.maxSessions() + " sessions; close one first");
+        }
+        int perUser = caller.limits().maxSessions();
+        if (perUser > 0 && sessions.values().stream()
+            .filter(other -> other != replacing && isActive(other) && session.owner().equals(other.owner()))
+            .count() >= perUser) {
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, session.owner().equals(caller.name())
+                    ? "You already have " + perUser + " open sessions, the most you may have on this server; close one first"
+                    : session.owner() + " already has " + perUser
+                            + " open sessions, the most they may have on this server; close one first");
+        }
+        sessions.put(session.id(), session);
+    }
+
+    /**
+     * Starts a failed session's agent again, in its own container, and resumes its task ({@link
+     * AgentSession#restart}). Only its owner or an admin may: the session then gets the caller's secrets.
+     * @throws ApiException as {@link AgentSession#restart}, 404 as {@link #get}, 429 when full
+     */
+    AgentSession.Info restart(Caller caller, String id, Map<String, String> secrets) {
+        AgentSession session = getToManage(caller, id, "restart it");
+        Map<String, String> checked = checkSecrets(secrets);
+        // a failed session does not count; started again, it does
+        admit(session, caller, session);
+        session.restart(caller.name(), checked);
+        return session.info();
+    }
+
+    /**
+     * Opens an archived session again, with the same id, in a new container: the server's checks for a new session
+     * apply again (image, capabilities, resources, limits), the repository is cloned again, and the agent's task is
+     * imported and resumed ({@link AgentSession#startFromArchive}). Once it runs, the archive is deleted: the
+     * session is live again, and archiving it once more makes a new archive. Only the owner or an admin may; the
+     * owner stays the archive's.
+     * @param secrets values for secrets the archived session had (others are refused)
+     * @throws ApiException 404 as {@link #archived}, 403 for users it was shared with, 409 if it has no agent
+     * state to resume, and as {@link #create}; the archive stays when it fails
+     */
+    AgentSession.Info resumeArchived(Caller caller, String id, Map<String, String> secrets, String apiKey,
+            List<ProfileFile> userProfile) {
+        SessionArchive.Entry entry = readable(caller, id);
+        if (!accessPolicy.canDelete(caller, entry)) {
+            throw new ApiException(HttpStatus.FORBIDDEN,
+                    "Only the owner of this archived session, or an admin, may resume it");
+        }
+        Object agentTask = archive.readAgentTask(entry.id());
+        if (agentTask == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "This archived session has no record of its agent's "
+                    + "conversation (its agent could not give one when it was archived), so it can be read, not resumed");
+        }
+        JsonNode details = entry.details();
+        String image = details.path("image").asString("");
+        allowedImages.check(image);
+        List<String> requested = new ArrayList<>();
+        details.path("capabilities").valueStream().forEach(capability -> requested.add(capability.asString("")));
+        List<String> checkedCapabilities = Capabilities.check(requested, caller.capabilities());
+        JsonNode recorded = details.path("resources");
+        Resources resources = Resources.of(recorded.path("memoryBytes").isNumber()
+                        ? recorded.path("memoryBytes").asLong() + "B" : null,
+                recorded.path("cpus").isNumber() ? recorded.path("cpus").asDouble() : null, properties.docker(),
+                caller.limits());
+        JsonNode repositoryDetails = details.path("repository");
+        GitRepository repository = repositoryDetails.isObject()
+                ? GitRepository.of(repositoryDetails.path("url").asString(null),
+                        repositoryDetails.path("branch").isString() ? repositoryDetails.path("branch").asString() : null,
+                        properties.git().allowedSchemes())
+                : null;
+        Set<String> archivedSecrets = new HashSet<>();
+        details.path("secrets").valueStream().forEach(name -> archivedSecrets.add(name.asString("")));
+        Map<String, String> checkedSecrets = checkSecrets(secrets);
+        List<String> unknown = checkedSecrets.keySet().stream().filter(name -> !archivedSecrets.contains(name))
+            .sorted().toList();
+        if (!unknown.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "The archived session did not have "
+                    + String.join(", ", unknown) + ": secrets can be given again, not added");
+        }
+        List<ProfileFile> checkedUserProfile = checkUserProfile(userProfile);
+        String checkedApiKey = checkApiKey(apiKey);
+        String title = details.path("title").asString(image);
+        AgentSession session = new AgentSession(new DockerRuntime.ContainerSpec(entry.id(), entry.owner(), image,
+                Map.of(), checkedCapabilities, resources), repository, checkedSecrets, checkedUserProfile, title,
+                checkedApiKey, entry.sharedWith(), archive.readEvents(entry.id()), docker, properties);
+        admit(session, caller, null);
+        try {
+            session.startFromArchive(caller.name(), agentTask);
+        } catch (RuntimeException e) {
+            sessions.remove(session.id());
+            throw e;
+        }
+        archive.delete(entry.id());
+        log.info("Archived session {} of {} resumed by {} with image {}, secrets {}", id, entry.owner(), caller.name(),
+                image, checkedSecrets.keySet());
+        return session.info();
     }
 
     private Map<String, String> checkEnv(Map<String, String> env) {
@@ -413,21 +507,24 @@ public class SessionManager {
      */
     void close(Caller caller, String id, boolean keep) {
         AgentSession session = getToManage(caller, id, keep ? "archive it" : "close it");
+        Object agentTask = null;
         if (keep) {
             int most = properties.archive().maxPerUser();
             if (most > 0 && archive.countOwnedBy(session.owner()) >= most) {
                 throw new ApiException(HttpStatus.CONFLICT, "There are already " + most + " archived sessions of "
                         + session.owner() + ", the most this server keeps for one user; delete some first");
             }
+            // the agent's own record, while it runs, so that the session can be resumed
+            agentTask = session.exportTask();
             // once before closing, so that a disk that refuses leaves the session open rather than gone
-            archive.write(session.info(), session.events().snapshot(), caller.name());
+            archive.write(session.info(), session.events().snapshot(), caller.name(), agentTask);
         }
         session.close();
         sessions.remove(id);
         if (keep) {
             // and again with everything up to the end; if this fails, the first copy stays
             try {
-                archive.write(session.info(), session.events().snapshot(), caller.name());
+                archive.write(session.info(), session.events().snapshot(), caller.name(), agentTask);
             } catch (ApiException e) {
                 log.warn("Session {}: its archive lacks the events of its last moments", id);
             }

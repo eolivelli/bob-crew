@@ -280,6 +280,7 @@ function setStatus(status) {
   state.status = status;
   updateCancel();
   $('clear').disabled = status !== 'IDLE';
+  $('restart').hidden = status !== 'FAILED';
   $('metrics-toggle').disabled = status === 'CLOSED';
   $('upload').disabled = !open || state.uploading;
   $('session-mode').disabled = !open;
@@ -435,6 +436,13 @@ function render(event) {
       break;
     case 'secrets_refreshed':
       add(el('div', 'divider', secretsRefreshedText(event)));
+      break;
+    case 'resumed':
+      // the agent's earlier turns are over, whatever they were doing
+      state.streaming = null;
+      state.inTurn = false;
+      state.workAfterTurn = false;
+      add(el('div', 'divider', resumedText(event)));
       break;
     case 'shared':
       add(el('div', 'divider', sharedEventText(event)));
@@ -1038,7 +1046,12 @@ async function showArchive(archived) {
   badge.textContent = 'archived';
   badge.className = 'badge archived';
   $('prompt-form').hidden = true;
-  $('delete-archive').disabled = !(archived.owner === state.user || $('admin-badge').hidden === false);
+  const mayManage = archived.owner === state.user || $('admin-badge').hidden === false;
+  $('delete-archive').disabled = !mayManage;
+  $('resume-archive').disabled = !mayManage || !archived.resumable;
+  $('resume-archive').title = archived.resumable
+    ? 'Open this session again in a new container, with its conversation; the repository is cloned again (owner or admin only)'
+    : 'This session was archived without its agent\'s record of the conversation, so it can be read, not resumed';
   refreshSessions();
   refreshArchives();
 }
@@ -1047,6 +1060,53 @@ function leaveArchive() {
   state.archive = null;
   document.querySelector('main').classList.remove('archived-view');
 }
+
+// The agent stopped (its container ended): start the same container again and go on with the conversation. The
+// UI app gives the session its secrets again, from ~/.bobcrew/secrets.json.
+$('restart').addEventListener('click', async () => {
+  const session = currentSession();
+  if (!session) return;
+  const button = $('restart');
+  button.disabled = true;
+  button.textContent = 'Restarting…';
+  try {
+    const response = await call('POST', sessionApi('/restart'));
+    const missing = response.headers.get('X-BobCrew-Missing-Secrets');
+    if (missing) notify(`Restarted without these secrets, which are not in ~/.bobcrew/secrets.json: ${missing}`);
+  } catch (e) {
+    notify(e.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Restart';
+    refreshSessions();
+  }
+});
+
+// An archived session opens again, with the same id, in a new container; its archive goes.
+$('resume-archive').addEventListener('click', async () => {
+  const archived = state.archive;
+  if (!archived) return;
+  const button = $('resume-archive');
+  button.disabled = true;
+  button.textContent = 'Resuming…';
+  let session;
+  try {
+    const response = await call('POST', archiveApi(archived, '/resume'));
+    session = await response.json();
+    const missing = response.headers.get('X-BobCrew-Missing-Secrets');
+    if (missing) notify(`Resumed without these secrets, which are not in ~/.bobcrew/secrets.json: ${missing}`);
+  } catch (e) {
+    notify(e.message);
+    button.disabled = false;
+    button.textContent = 'Resume';
+    return;
+  }
+  button.textContent = 'Resume';
+  leaveArchive();
+  await refreshSessions();
+  refreshArchives();
+  select(session.id, archived.server);
+});
 
 $('delete-archive').addEventListener('click', async () => {
   const archived = state.archive;

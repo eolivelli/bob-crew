@@ -83,7 +83,10 @@
       <button id="clear" type="button" class="danger live-only" title="Start the conversation over, optionally deleting the workspace's files; the session stays open">Clear</button>
       <button id="refresh-secrets" type="button" class="live-only" title="Replace this session's secrets with the values now in ~/.bobcrew/secrets.json, for example after replacing an expired GitHub token (owner only)">Refresh secrets</button>
       <button id="share" type="button" class="live-only" title="Choose who else may use this session (owner only)">Share</button>
+      <button id="restart" type="button" class="live-only" hidden
+        title="Start this session's agent again in its container and go on with its conversation; the workspace is as it was (owner or admin only)">Restart</button>
       <button id="close" type="button" class="danger live-only">Close session</button>
+      <button id="resume-archive" type="button" class="archive-only">Resume</button>
       <button id="delete-archive" type="button" class="danger archive-only"
         title="Delete this archived session from the server, for good (owner or admin only)">Delete archive</button>
     </div>

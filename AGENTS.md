@@ -88,7 +88,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `ContainerAcpTransport` | The SDK's `AcpClientTransport` over a container's attach streams. The one class of ours with Reactor types, because the SDK interface has them. |
 | `ContainerMetrics` | The metrics record (`GET /sessions/{id}/metrics`). |
 | `EventLog` | A session's numbered events with replay; one queue per subscriber. `snapshot()` is what an archive keeps. |
-| `SessionArchive` | Closed sessions kept to read later (`DELETE /sessions/{id}?archive=true`): a directory per session under `bobcrew.archive.dir` with `info.json` (its `Info`, plus `archivedAt`, `archivedBy`, `eventCount`) and `events.json`, each written to a temporary file and renamed. No database, like the rest. |
+| `SessionArchive` | Closed sessions kept to read later (`DELETE /sessions/{id}?archive=true`): a directory per session under `bobcrew.archive.dir` with `info.json` (its `Info`, plus `archivedAt`, `archivedBy`, `eventCount`, `resumable`), `events.json` and, when the agent gave one, `agent.json` (Bob's `_bob/task/export`, what resuming needs), each written to a temporary file and renamed. No database, like the rest. |
 | `UiEvent` | The event record clients receive, and the event type names. |
 | `ContainerPaths` | Turns a client-supplied file path into a path inside `/opt/workspace` of the container. The only place that does. |
 | `SessionAccessPolicy` | Who may use a session (owner, users it is shared with, admins) and who may close or re-share it (owner, admins); who may read an archived one (the same, as it was shared when closed) and delete it (owner, admins). Decide access here and nowhere else. |
@@ -100,7 +100,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 
 | Class | Role |
 |---|---|
-| `ProxyController` | Forwards `/api/**` to the server with the server's token, or the user's login (`OidcLogin.currentToken()`; 401 `{"login": "/login"}` without one); streams responses through, and upload request bodies too (other bodies are read whole, up to 2 MB). Rewrites a secrets refresh (`PUT .../sessions/{id}/secrets`: nothing in, the secrets file's values for the session's secret names out). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`), `apiKey` (the secrets file's `BOB_API_KEY`, with or without a role), `userProfile` (from `UserProfileStore`) and `repository` out; the browser's `repository` (or null) and `capabilities` replace the role's; refuses `image`/`env`/`secrets`/`apiKey`/`userProfile` sent by the browser. |
+| `ProxyController` | Forwards `/api/**` to the server with the server's token, or the user's login (`OidcLogin.currentToken()`; 401 `{"login": "/login"}` without one); streams responses through, and upload request bodies too (other bodies are read whole, up to 2 MB). Rewrites a secrets refresh (`PUT .../sessions/{id}/secrets`: nothing in, the secrets file's values for the session's secret names out), a restart (`POST .../sessions/{id}/restart`, the same) and an archive's resume (`POST .../archives/{id}/resume`: the archive's secret names, plus `apiKey` and `userProfile` as for a new session). Rewrites session creation: `role` in, the role's `image`, `secrets` (values from `SecretStore`), `apiKey` (the secrets file's `BOB_API_KEY`, with or without a role), `userProfile` (from `UserProfileStore`) and `repository` out; the browser's `repository` (or null) and `capabilities` replace the role's; refuses `image`/`env`/`secrets`/`apiKey`/`userProfile` sent by the browser. |
 | `LocalOnlyFilter` | Refuses anything not coming from the UI's own pages on the loopback interface. |
 | `ServerConnection` | Server URL, token (none when the login provides it), and the HTTP client with the trusted CA. |
 | `OidcLogin`, `LoginController` | The user's Keycloak login: authorization code with PKCE as a public client, `state` once and for 10 minutes, tokens in memory only, refreshed 30 s before expiry; `/login`, `/login/callback`, `/logout`, `/api/login`. |
@@ -131,6 +131,14 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 5. When `client.prompt` returns, a `turn_end` event is appended and status returns to `IDLE`.
 6. Clients read all of this from `GET /api/sessions/{id}/events?after=<seq>`.
 
+Resuming goes through the same `AgentSession.launch` as step 0, with another way of opening the agent's session:
+`restart` reconnects to the *same* stopped container (`connect` attaches, then starts it again; secrets are written
+again, everything else is on its disk) and calls `session/resume` with the ACP session id, which for Bob is its task
+id; `startFromArchive` creates a new container, clones the repository, `_bob/task/import`s the archived export and
+resumes the id that import answers. Either falls back to `session/new`, with an `error` event, when the agent
+cannot resume. A resumed archive's `EventLog` starts from the archived events (their numbers kept), so clients
+see one transcript.
+
 ## Things that are easy to get wrong
 
 - **ACP SDK** (`com.agentclientprotocol:acp-core`, version in the root `pom.xml`) is pre-1.0 and
@@ -152,6 +160,12 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
   the container runs, so `ContainerAcpTransport.connect` calls its `afterStart` hook (which writes them) right after
   starting the container, before the SDK sends `initialize`. Writing them later, after `initialize`, would wait
   forever for an agent that waits for them.
+- **Resuming needs the agent's own state**: Bob's task lives in its database in the container, so a restart uses
+  the same container (never `docker.remove` a failed session's container before it is closed), and an archive can
+  only be resumed if `exportTask` ran while the agent was alive (at archive time; a failed session's archive is
+  not resumable). The SDK's `resumeSession` requires `sessionCapabilities.resume` in the agent's capabilities; Bob's
+  task transfer is advertised as `agentCapabilities._meta["bob/extensions"].version`. Plain JSON values (maps and
+  lists) go to `sendExtRequest`, not Jackson 3 nodes: the SDK has its own mapper.
 - **Secrets can be written again on a running session** (`AgentSession.refreshSecrets`, for tokens that expire).
   The agent is then the same user with write access to the secrets' directory, so `DockerRuntime.writeSecrets`
   must not trust what is there: a `mktemp` name, `mv -T` over the target, never a fixed temporary name or a

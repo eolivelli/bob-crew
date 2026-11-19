@@ -1,9 +1,15 @@
 package bobcrew.fakeagent;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -33,8 +39,16 @@ import tools.jackson.databind.node.ObjectNode;
  * <li>{@code showenv NAME}: report the value of environment variable NAME, or that it is unset</li>
  * <li>{@code writefile}: write {@code out/hello.txt} under the working directory</li>
  * <li>{@code makelink}: create {@code out/link}, a symbolic link to {@code /etc/passwd}</li>
+ * <li>{@code recall}: list the prompts this session's task had before this one, earlier ones included</li>
+ * <li>{@code forget}: delete this session's task, so that it can no longer be resumed</li>
  * <li>anything else: think, then echo the prompt back word by word</li>
  * </ul>
+ *
+ * <p>Like Bob, it keeps each session's task on disk ({@code $HOME/.fake-agent/tasks/<session id>}: its prompts, one per
+ * line), so that a container restarted after a crash can {@code session/resume} it. It also offers Bob's task-transfer
+ * extension: it advertises {@code agentCapabilities._meta["bob/extensions"] = {"version": 1}} and answers
+ * {@code _bob/task/export} ({@code {"version": 1, "tasks": [{"id", "prompts"}]}}) and {@code _bob/task/import}
+ * ({@code {"sessionIds": [a new id]}}). {@code session/resume} of a task it does not have is an error.
  */
 public final class FakeAcpAgent {
 
@@ -89,6 +103,8 @@ public final class FakeAcpAgent {
                 ObjectNode capabilities = result.putObject("agentCapabilities");
                 capabilities.put("loadSession", false);
                 capabilities.putObject("promptCapabilities");
+                capabilities.putObject("sessionCapabilities").putObject("resume");
+                capabilities.putObject("_meta").putObject("bob/extensions").put("version", 1);
                 result.putArray("authMethods");
                 ObjectNode info = result.putObject("agentInfo");
                 info.put("name", "fake-agent");
@@ -98,18 +114,56 @@ public final class FakeAcpAgent {
             }
             case "session/new" -> {
                 String sessionId = "fake-" + UUID.randomUUID();
-                cancelled.put(sessionId, new AtomicBoolean());
-                modes.put(sessionId, "agent");
-                ObjectNode result = JSON.createObjectNode();
-                result.put("sessionId", sessionId);
-                ObjectNode modeState = result.putObject("modes");
-                modeState.put("currentModeId", "agent");
-                ArrayNode available = modeState.putArray("availableModes");
-                for (String mode : new String[] {"agent", "plan", "ask"}) {
-                    ObjectNode entry = available.addObject();
-                    entry.put("id", mode);
-                    entry.put("name", Character.toUpperCase(mode.charAt(0)) + mode.substring(1));
+                try {
+                    saveTask(sessionId, List.of());
+                } catch (IOException e) {
+                    respondError(id, -32603, "Cannot store the task: " + e);
+                    return;
                 }
+                ObjectNode result = openSession(sessionId);
+                result.put("sessionId", sessionId);
+                respond(id, result);
+            }
+            case "session/resume" -> {
+                String sessionId = params.path("sessionId").asString("");
+                if (!isTaskId(sessionId) || !Files.isRegularFile(taskFile(sessionId))) {
+                    respondError(id, -32602, "No such task: " + sessionId);
+                    return;
+                }
+                respond(id, openSession(sessionId));
+            }
+            case "_bob/task/export" -> {
+                String sessionId = params.path("sessionId").asString("");
+                try {
+                    ObjectNode result = JSON.createObjectNode();
+                    result.put("version", 1);
+                    ObjectNode task = result.putArray("tasks").addObject();
+                    task.put("id", sessionId);
+                    ArrayNode prompts = task.putArray("prompts");
+                    loadTask(sessionId).forEach(prompts::add);
+                    respond(id, result);
+                } catch (IOException e) {
+                    respondError(id, -32600, "No such task: " + sessionId);
+                }
+            }
+            case "_bob/task/import" -> {
+                JsonNode task = params.path("snapshot").path("tasks").path(0);
+                if (!task.isObject() || !params.path("cwd").asString("").startsWith("/")) {
+                    respondError(id, -32602, "Invalid snapshot or cwd");
+                    return;
+                }
+                // like Bob, a copy with a new id
+                String imported = "fake-" + UUID.randomUUID();
+                List<String> prompts = new ArrayList<>();
+                task.path("prompts").valueStream().forEach(prompt -> prompts.add(prompt.asString("")));
+                try {
+                    saveTask(imported, prompts);
+                } catch (IOException e) {
+                    respondError(id, -32603, "Cannot store the task: " + e);
+                    return;
+                }
+                ObjectNode result = JSON.createObjectNode();
+                result.putArray("sessionIds").add(imported);
                 respond(id, result);
             }
             case "session/set_mode" -> {
@@ -148,6 +202,45 @@ public final class FakeAcpAgent {
         }
     }
 
+    /** Opens a session on a task (new or resumed): its modes, as {@code session/new} and {@code session/resume} answer. */
+    private ObjectNode openSession(String sessionId) {
+        cancelled.put(sessionId, new AtomicBoolean());
+        modes.putIfAbsent(sessionId, "agent");
+        ObjectNode result = JSON.createObjectNode();
+        ObjectNode modeState = result.putObject("modes");
+        modeState.put("currentModeId", modes.get(sessionId));
+        ArrayNode available = modeState.putArray("availableModes");
+        for (String mode : new String[] {"agent", "plan", "ask"}) {
+            ObjectNode entry = available.addObject();
+            entry.put("id", mode);
+            entry.put("name", Character.toUpperCase(mode.charAt(0)) + mode.substring(1));
+        }
+        return result;
+    }
+
+    private static boolean isTaskId(String sessionId) {
+        return sessionId.matches("fake-[0-9a-f-]{36}");
+    }
+
+    private static Path taskFile(String sessionId) {
+        String home = System.getenv("HOME");
+        return Path.of(home == null || home.isBlank() ? System.getProperty("user.home") : home, ".fake-agent", "tasks",
+                sessionId);
+    }
+
+    private static List<String> loadTask(String sessionId) throws IOException {
+        if (!isTaskId(sessionId)) {
+            throw new IOException("not a task id");
+        }
+        return Files.readAllLines(taskFile(sessionId), StandardCharsets.UTF_8);
+    }
+
+    private static void saveTask(String sessionId, List<String> prompts) throws IOException {
+        Path file = taskFile(sessionId);
+        Files.createDirectories(file.getParent());
+        Files.write(file, prompts, StandardCharsets.UTF_8);
+    }
+
     private ObjectNode prompt(JsonNode params) throws Exception {
         String sessionId = params.path("sessionId").asString();
         AtomicBoolean stop = cancelled.computeIfAbsent(sessionId, k -> new AtomicBoolean());
@@ -162,6 +255,19 @@ public final class FakeAcpAgent {
         String lower = prompt.toLowerCase();
 
         chunk(sessionId, "agent_thought_chunk", "Thinking about: " + prompt);
+
+        if (isTaskId(sessionId) && Files.isRegularFile(taskFile(sessionId))) {
+            if (lower.contains("recall")) {
+                chunk(sessionId, "agent_message_chunk", "remembered: " + String.join(" | ", loadTask(sessionId)) + " ");
+            }
+            // one line per prompt
+            Files.writeString(taskFile(sessionId), prompt.replaceAll("[\\r\\n]+", " ") + "\n", StandardCharsets.UTF_8,
+                    StandardOpenOption.APPEND);
+            if (lower.contains("forget")) {
+                Files.delete(taskFile(sessionId));
+                chunk(sessionId, "agent_message_chunk", "forgot this task ");
+            }
+        }
 
         if (lower.contains("crash")) {
             chunk(sessionId, "agent_message_chunk", "About to crash");

@@ -108,6 +108,16 @@ function secretsRefreshedText(event) {
   return `${event.user || 'someone'} refreshed the session's secrets` + (names.length ? `: ${names.join(', ')}` : '');
 }
 
+// The one-line description of a resumed event: the session's agent was started again, after a crash or from the
+// session's archive, and went on with its conversation.
+function resumedText(event) {
+  const from = event.data && event.data.from;
+  const who = event.user || 'someone';
+  if (from === 'crash') return `${who} restarted the session after its agent stopped; the conversation goes on`;
+  if (from === 'archive') return `${who} resumed the session from its archive, in a new container`;
+  return `${who} resumed the session`;
+}
+
 // The marker for a turn_end event, shown for every turn, so that anything the agent sends later is visibly
 // outside the turn; the page uses it too.
 function turnEndText(stopReason) {
@@ -218,6 +228,9 @@ function transcriptItems(events) {
         break;
       case 'secrets_refreshed':
         items.push({ type: 'divider', text: secretsRefreshedText(event) });
+        break;
+      case 'resumed':
+        items.push({ type: 'divider', text: resumedText(event) });
         break;
       case 'shared':
         items.push({ type: 'divider', text: sharedEventText(event) });

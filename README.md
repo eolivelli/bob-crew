@@ -5,7 +5,8 @@
 > [!WARNING]
 > **For testing purposes only. Not meant to be used in production.**
 >
-> bob-crew is an experimental extension for IBM Bob. It has no database and keeps sessions in memory.
+> bob-crew is an experimental extension for IBM Bob. It has no database: it keeps open sessions in memory, and
+> archived ones as files on the server's disk.
 > Its Keycloak setup uses Keycloak's embedded database, which Keycloak does not support in production. The
 > wide-permission scripts run agents with `--trust` and `--auto-approve`. Do not run it on a machine that holds
 > data or credentials you cannot afford to expose, and do not put it on a public network.
@@ -36,7 +37,9 @@ allows it, a session can get a Docker Engine or virtual machines of its own
 ([capabilities](#capabilities-docker-and-virtual-machines)). By default containers have no resource
 limits; sessions can [ask for some](#resources).
 Users can upload files into a session's workspace, and a role can have a git repository cloned there
-when the session starts.
+when the session starts. Each user can bring their own [Bob API key](#api-keys) instead of sharing the
+server's. A closed session can be [archived](#archiving-a-session) on the server, to read, export or
+[resume](#resuming-a-session) later, and a session whose agent crashed can be restarted where it stopped.
 
 | Module | What it is |
 |---|---|
@@ -153,7 +156,10 @@ export BOBCREW_AGENT_COMMAND=java,-jar,/opt/fake-agent.jar
 The fake agent reacts to words in the prompt: `tool` (asks permission), `plan`, `slow` (runs until
 stopped), `background` (ends the turn, then keeps sending text until stopped), `crash`, `whoami` (its
 user, uid and directory), `showenv NAME` (an environment variable),
-`writefile` (writes `out/hello.txt`), `makelink` (a symbolic link `out/link` to `/etc/passwd`).
+`writefile` (writes `out/hello.txt`), `makelink` (a symbolic link `out/link` to `/etc/passwd`), `recall` (the
+prompts its task has had, so you can see a resumed session remember) and `forget` (deletes its task, so that
+resuming it fails). Like Bob it keeps its task on disk and offers `session/resume` and Bob's task export and
+import.
 
 On your laptop, `scripts/init-ui-config.sh` prepares `~/.bobcrew/` from [`ui.template/`](ui.template/README.md)
 (it never overwrites a file). With the token and a copy of `certs/ca.crt`, edit `~/.bobcrew/ui.properties`:
@@ -412,6 +418,30 @@ session stays open, until they delete some. Archives are files on the server, un
 directory per session, named by its id, with `info.json` and `events.json`. They survive restarts and can be
 backed up, or removed by hand.
 
+## Resuming a session
+
+Bob keeps each conversation as a *task* in its own database in the container (`~/.bob/db`), and its ACP server can
+reopen one (`session/resume`) and export or import one (`_bob/task/export`, `_bob/task/import`, Bob's own
+extension). bob-crew uses them two ways:
+
+- **After a crash**: when a session's agent stops (the container ended: an out-of-memory kill, Bob exiting, a
+  `crash`), the session is *failed*, and its owner (or an admin) gets a **Restart** button. It starts the same
+  container again, so the workspace, Bob's database and whatever was installed are as they were, writes the
+  session's secrets again (from `~/.bobcrew/secrets.json`, as **Refresh secrets** does; their tmpfs is new), and
+  resumes Bob's task. Commands that were running are not: the agent is told so with the next prompt.
+- **From the archive**: **Close and archive** also asks Bob for its task export, kept with the archive
+  (`agent.json`). An archived session that has it shows **Resume**: it opens again, with the same id, in a new
+  container (the archived image, capabilities and resources, checked again against what the user may have now),
+  with its secrets, API key and user profile files from this computer as for a new session, and the repository
+  cloned again; Bob imports the task and goes on with it. The transcript continues where it stopped, and the
+  archive is deleted: the session is live again. Files the workspace had are gone, except the repository as it is
+  upstream (changes that were not pushed are lost), and the agent is told so with the next prompt.
+
+When the agent cannot resume its task (an archive made before this existed has no export, and cannot be resumed;
+an agent that lost its task, or does not support resuming), the session still opens, with a new conversation, and
+the transcript says so. A server restart still loses the open sessions: it removes this instance's containers
+when it starts.
+
 ## Exporting a session
 
 Each message, tool call and plan in a session has a **Copy** button beside it (it shows when the pointer is on
@@ -434,7 +464,11 @@ written by the session's own (non-root) user, so they land only where the agent 
 never through a symbolic link. Every upload shows in the conversation with who made it. The limit is
 `bobcrew.max-upload-size` (200 MB) per file; `BOBCREW_FILE_UPLOADS_ENABLED=false` turns uploads off.
 
-## Clearing a session and container metrics
+## Stopping, clearing and container metrics
+
+**Stop** in a session's header asks the agent to end its turn. It stays usable after a turn ended while the agent
+still sends work it started (Bob can leave a command running past its turn). A turn has no time limit unless the
+server sets one (`BOBCREW_PROMPT_TIMEOUT`); when it passes, the agent is asked to stop and the transcript says so.
 
 **Clear** in a session's header starts the conversation over in the same container. It asks whether to
 keep the workspace's files (useful when the agent has cloned a repository there) or delete them.
@@ -662,10 +696,12 @@ Keycloak user without the access role.
 | `POST /sessions` `{"title": "...", "image": "...", "env": {"NAME": "value"}, "secrets": {"NAME": "value"}, "repository": {"url": "https://...", "branch": "main"}, "capabilities": ["docker"], "resources": {"memory": "8GB", "cpus": 2}, "userProfile": [{"path": ".gitconfig", "contentBase64": "...", "executable": false}], "apiKey": "..."}` | Creates a session and starts its agent in a new container, after cloning `repository` (shallow; `branch` optional) into `/opt/workspace/<name>`; all fields optional (`image` defaults to the server's default image). `secrets` become files in `/run/bobcrew/secrets`, `env` environment variables, `apiKey` the Bob API key of this session's agent in place of the server's ([API keys](#api-keys)), `userProfile` files under `/home/bob` ([User profile files](#user-profile-files)). 400 if the image is not on the server, a variable, secret or user profile file is refused, or the repository is refused or cannot be cloned, a capability is unknown or a resource request is invalid or above the user's cap; 403 for a capability the user may not use |
 | `GET /sessions/{id}` | One session: `id`, `owner`, `sharedWith`, `title`, `image`, `containerId`, `secrets` (names), `ownApiKey` (whether it runs with a key of its own rather than the server's), `repository` (`url`, `branch`, `directory`, or null), `capabilities`, `resources` (`memoryBytes`, `cpus`; null for no limit), `status`, `agent`, `currentMode`, `modes`, `createdAt`, `updatedAt`, `lastSeq` |
 | `DELETE /sessions/{id}` | Closes it and removes its container; with `?archive=true` its details and events are kept first ([Archiving](#archiving-a-session)). Owner or admin only (403 for users it is shared with); with `archive`, 409 when the owner keeps as many archived sessions as they may, and the session stays open |
-| `GET /archives` | The archived sessions the caller may read, newest first: each session's details as when it closed, plus `archivedAt`, `archivedBy` and `eventCount` |
+| `GET /archives` | The archived sessions the caller may read, newest first: each session's details as when it closed, plus `archivedAt`, `archivedBy`, `eventCount` and `resumable` (whether it can be resumed) |
 | `GET /archives/{id}` | One of them (404 if there is none or the caller may not read it) |
 | `GET /archives/{id}/events` | Its events, a JSON array of what the event stream sent |
 | `DELETE /archives/{id}` | Deletes it for good. Owner or admin only (403 for users it was shared with) |
+| `POST /archives/{id}/resume` `{"secrets": {"NAME": "value"}, "apiKey": "...", "userProfile": [...]}` | Opens it again, with the same id, in a new container, and resumes its agent's task ([Resuming](#resuming-a-session)); the archive is deleted once it runs. Answers 201 with the session. Owner or admin only (403 for users it was shared with); 409 if the archive has no agent record (`resumable` false in its details) or the session is open already, 429 when the user has as many sessions open as they may (the archive stays), and as for `POST /sessions` |
+| `POST /sessions/{id}/restart` `{"secrets": {"NAME": "value"}}` | Starts a failed session's agent again in its container and resumes its task, with the session's secrets given again (only names it has). Owner or admin only; 409 if the session is not failed or its container is gone |
 | `PUT /sessions/{id}/sharing` `{"users": ["bob", "carol"]}` | Shares the session with exactly these users (`[]`: nobody else), and records a `shared` event. Owner or admin only (403 for users it is shared with); at most 50 names |
 | `PUT /sessions/{id}/secrets` `{"secrets": {"NAME": "value"}}` | Replaces the values of secrets the session was created with, in the running container, runs the image's setup again, and records a `secrets_refreshed` event. Owner or admin only (403 for users it is shared with); 400 for a secret the session does not have, 409 if the session is not open |
 | `GET /sessions/{id}/file?path=<path>` | Downloads a regular file from the session's workspace; `path` is relative to `/opt/workspace` or absolute inside it, `file://` allowed (403 if downloads are disabled) |
@@ -695,7 +731,7 @@ bodies are limited to 2 MB.
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,
 `permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here; `data.workspaceWiped` says whether the files went too), `file_uploaded` (`user` uploaded `data.path`, `data.size` bytes), `repository_cloned` (`data.url`, `data.branch`, `data.path`), `shared` (`user` shared the session with
-`data.users`, the whole new list), `secrets_refreshed` (`user` replaced the values of the secrets `data.names`). The server keeps the last 5000 events of a
+`data.users`, the whole new list), `secrets_refreshed` (`user` replaced the values of the secrets `data.names`), `resumed` (`user` started the agent again: `data.from` is `crash` or `archive`). The server keeps the last 5000 events of a
 session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss nothing.
 
 ## Not in this version
@@ -704,7 +740,7 @@ One process on one machine, by design. A later version can split it into workers
 agent containers), stateless coordinators and a small metadata store; `SessionManager` is the seam
 for that. Also not done yet: renewing GitHub tokens without a person (a GitHub App whose
 8-hour user tokens the UI would refresh and send to its sessions), cloning over ssh, re-cloning after a wipe,
-resuming a session after a restart, workspaces that outlive their
+resuming the sessions of a server that restarted, workspaces that outlive their
 session or are shared between sessions, pulling images, per-session network policies, metrics history,
 capabilities without a privileged container (with a runtime such as Sysbox), a UI shared by many users (each
 runs their own), Keycloak with PostgreSQL in the scripts.

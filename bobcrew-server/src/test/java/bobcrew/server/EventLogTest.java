@@ -27,6 +27,20 @@ class EventLogTest {
     }
 
     @Test
+    void goesOnFromEarlierEvents() throws Exception {
+        java.time.Instant then = java.time.Instant.parse("2026-01-01T00:00:00Z");
+        List<UiEvent> history = List.of(new UiEvent(4, then, "a", null, null), new UiEvent(5, then, "b", "x", null),
+                new UiEvent(5, then, "repeated", null, null), new UiEvent(7, then, "c", null, null));
+        EventLog log = new EventLog(3, history);
+        assertThat(log.lastSeq()).isEqualTo(7);
+        log.append("d", null, null);
+        try (EventLog.Subscription subscription = log.subscribe(0)) {
+            assertThat(drain(subscription)).as("the newest kept, numbering goes on").containsExactly(5L, 7L, 8L);
+        }
+        assertThat(log.snapshot().get(0).user()).as("kept as they were").isEqualTo("x");
+    }
+
+    @Test
     void keepsOnlyTheLastEvents() throws Exception {
         EventLog log = new EventLog(3);
         for (int i = 0; i < 10; i++) {

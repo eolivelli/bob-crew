@@ -36,7 +36,26 @@ final class EventLog {
     private boolean closed;
 
     EventLog(int capacity) {
+        this(capacity, List.of());
+    }
+
+    /**
+     * A log that goes on from earlier events (a session resumed from its archive): they are kept as they were,
+     * numbers included, and new ones are numbered after the last of them.
+     * @param history oldest first, numbered in increasing order
+     */
+    EventLog(int capacity, List<UiEvent> history) {
         this.capacity = Math.max(1, capacity);
+        for (UiEvent event : history) {
+            if (event.seq() <= lastSeq) {
+                continue;
+            }
+            events.addLast(event);
+            lastSeq = event.seq();
+            if (events.size() > this.capacity) {
+                events.removeFirst();
+            }
+        }
     }
 
     /** Records an event and hands it to the subscribers. Ignored once the log is closed. */

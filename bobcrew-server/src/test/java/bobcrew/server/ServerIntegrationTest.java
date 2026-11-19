@@ -543,6 +543,127 @@ class ServerIntegrationTest {
     }
 
     @Test
+    void aSessionWhoseAgentCrashedIsRestartedAndGoesOn() throws Exception {
+        JsonNode session = create(new LinkedHashMap<>(Map.of("title", "crashy",
+                "secrets", Map.of("GH_TOKEN", "first-token"))));
+        String id = session.get("id").asString();
+        String container = session.get("containerId").asString();
+        String restart = "/sessions/" + id + "/restart";
+        String secrets = JSON.writeValueAsString(Map.of("secrets", Map.of("GH_TOKEN", "second-token")));
+        assertThat(ask(id, "remember the lighthouse")).contains("remember the lighthouse");
+        assertThat(send("POST", restart, secrets, alice).statusCode()).as("not failed").isEqualTo(409);
+
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"crash\"}", alice);
+        awaitStatus(id, "FAILED");
+        share(id, alice, "bob");
+        assertThat(send("POST", restart, secrets, token("bob")).statusCode()).as("shared, not managed").isEqualTo(403);
+        assertThat(send("POST", restart, secrets, token("carol")).statusCode()).isEqualTo(404);
+        assertThat(send("POST", restart, JSON.writeValueAsString(Map.of("secrets", Map.of("OTHER", "x"))), alice)
+            .statusCode()).as("secrets can be given again, not added").isEqualTo(400);
+
+        HttpResponse<String> restarted = send("POST", restart, secrets, alice);
+        assertThat(restarted.statusCode()).as(restarted.body()).isEqualTo(200);
+        JsonNode info = JSON.readTree(restarted.body());
+        assertThat(info.get("status").asString()).isEqualTo("IDLE");
+        assertThat(info.get("containerId").asString()).as("the same container").isEqualTo(container);
+        assertThat(restarted.body()).doesNotContain("second-token");
+
+        String text = ask(id, "recall");
+        assertThat(text).as("the conversation went on").contains("remember the lighthouse | crash")
+            .as("and the agent is told what happened").contains("stopped unexpectedly and has been started again");
+        assertThat(execOutput(container, "cat", "/run/bobcrew/secrets/GH_TOKEN")).isEqualTo("second-token");
+        String events = eventsText(id);
+        assertThat(events).contains("\"type\":\"resumed\"").contains("\"from\":\"crash\"")
+            .doesNotContain("could not resume");
+
+        // an agent that lost its task starts over, and says so
+        ask(id, "forget");
+        send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"crash\"}", alice);
+        awaitStatus(id, "FAILED");
+        assertThat(send("POST", restart, null, alice).statusCode()).isEqualTo(200);
+        assertThat(eventsText(id)).contains("could not resume its conversation");
+        assertThat(ask(id, "recall")).contains("remembered:  ").doesNotContain("lighthouse");
+    }
+
+    @Test
+    void anArchivedSessionIsResumedWhereItStopped() throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("title", "to go on");
+        body.put("secrets", Map.of("GH_TOKEN", "first-token"));
+        body.put("repository", Map.of("url", TestDocker.SAMPLE_REPOSITORY, "branch", "feature"));
+        JsonNode session = create(body);
+        String id = session.get("id").asString();
+        assertThat(ask(id, "remember the harbour")).contains("remember the harbour");
+        long before = JSON.readTree(send("GET", "/sessions/" + id, null, alice).body()).get("lastSeq").asLong();
+        assertThat(send("DELETE", "/sessions/" + id + "?archive=true", null, alice).statusCode()).isEqualTo(204);
+        assertThat(JSON.readTree(send("GET", "/archives/" + id, null, alice).body()).get("resumable").asBoolean())
+            .isTrue();
+
+        String resume = "/archives/" + id + "/resume";
+        String secrets = JSON.writeValueAsString(Map.of("secrets", Map.of("GH_TOKEN", "second-token")));
+        assertThat(send("POST", resume, secrets, token("carol")).statusCode()).isEqualTo(404);
+        assertThat(send("POST", resume, JSON.writeValueAsString(Map.of("secrets", Map.of("OTHER", "x"))), alice)
+            .statusCode()).isEqualTo(400);
+        // alice may have two sessions open: with two, it waits, and the archive stays
+        createSession("one");
+        String two = createSession("two").get("id").asString();
+        assertThat(send("POST", resume, secrets, alice).statusCode()).isEqualTo(429);
+        assertThat(send("GET", "/archives/" + id, null, alice).statusCode()).isEqualTo(200);
+        assertThat(send("DELETE", "/sessions/" + two, null, alice).statusCode()).isEqualTo(204);
+
+        HttpResponse<String> resumed = send("POST", resume, secrets, alice);
+        assertThat(resumed.statusCode()).as(resumed.body()).isEqualTo(201);
+        JsonNode info = JSON.readTree(resumed.body());
+        assertThat(info.get("id").asString()).as("the same session").isEqualTo(id);
+        assertThat(info.get("status").asString()).isEqualTo("IDLE");
+        assertThat(info.get("title").asString()).isEqualTo("to go on");
+        assertThat(info.get("secrets").toString()).isEqualTo("[\"GH_TOKEN\"]");
+        assertThat(send("GET", "/archives/" + id, null, alice).statusCode()).as("back to live").isEqualTo(404);
+        assertThat(execOutput(info.get("containerId").asString(), "cat", "/run/bobcrew/secrets/GH_TOKEN"))
+            .isEqualTo("second-token");
+
+        String text = ask(id, "recall");
+        assertThat(text).contains("remembered:").contains("remember the harbour")
+            .contains("has now been resumed, in a new container")
+            .contains("cloned again at /opt/workspace/sample");
+        JsonNode events = JSON.readTree("[" + String.join(",", eventLines(id)) + "]");
+        assertThat(events.get(0).get("seq").asLong()).as("the transcript from the start").isEqualTo(1);
+        for (int i = 1; i < events.size(); i++) {
+            assertThat(events.get(i).get("seq").asLong()).as("contiguous").isEqualTo(events.get(i - 1).get("seq").asLong() + 1);
+        }
+        assertThat(events.get((int) before).get("seq").asLong()).isGreaterThan(before);
+        assertThat(events.toString()).contains("\"from\":\"archive\"").contains("remember the harbour")
+            .doesNotContain("could not resume");
+    }
+
+    /** Polls until the session has the status. */
+    private void awaitStatus(String id, String status) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+        while (System.nanoTime() < deadline) {
+            if (JSON.readTree(send("GET", "/sessions/" + id, null, alice).body()).path("status").asString("")
+                .equals(status)) {
+                return;
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("The session did not become " + status);
+    }
+
+    /** The session's events as the stream sends them, up to its last one now. */
+    private List<String> eventLines(String id) throws Exception {
+        long last = JSON.readTree(send("GET", "/sessions/" + id, null, alice).body()).get("lastSeq").asLong();
+        List<String> lines = new ArrayList<>();
+        for (JsonNode event : events(id, 0, event -> event.get("seq").asLong() >= last)) {
+            lines.add(event.toString());
+        }
+        return lines;
+    }
+
+    private String eventsText(String id) throws Exception {
+        return String.join("\n", eventLines(id));
+    }
+
+    @Test
     void aSessionRunsWithItsOwnApiKey() throws Exception {
         String ownKey = "alices-own-key-that-must-never-leak";
         Map<String, Object> body = new LinkedHashMap<>();

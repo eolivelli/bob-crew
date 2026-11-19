@@ -75,6 +75,17 @@ class SessionController {
         }
     }
 
+    /** What resuming an archived session takes again: as in {@link CreateRequest}, values are never logged. */
+    record ResumeRequest(Map<String, String> secrets, String apiKey, List<ProfileFile> userProfile) {
+
+        @Override
+        public String toString() {
+            return "ResumeRequest[secrets=" + (secrets == null ? "{}" : secrets.keySet()) + ", apiKey="
+                    + (apiKey == null || apiKey.isBlank() ? "<none>" : "<set>") + ", userProfile="
+                    + (userProfile == null ? "[]" : userProfile.stream().map(ProfileFile::path).toList()) + "]";
+        }
+    }
+
     record ClearRequest(Boolean wipeWorkspace) {
     }
 
@@ -206,6 +217,28 @@ class SessionController {
     @PutMapping("/sessions/{id}/secrets")
     AgentSession.Info refreshSecrets(@PathVariable String id, @RequestBody SecretsRequest request, Caller caller) {
         return sessions.refreshSecrets(caller, id, request.secrets());
+    }
+
+    /**
+     * Starts the agent of a session that failed (its container stopped) again, in the same container, and resumes
+     * its conversation. The body gives the values of the session's secrets again. Owner or admin only.
+     */
+    @PostMapping("/sessions/{id}/restart")
+    AgentSession.Info restart(@PathVariable String id, @RequestBody(required = false) SecretsRequest request,
+            Caller caller) {
+        return sessions.restart(caller, id, request == null ? null : request.secrets());
+    }
+
+    /**
+     * Opens an archived session again, with the same id, in a new container, and resumes its agent's conversation;
+     * the archive is then deleted. Owner or admin only.
+     */
+    @PostMapping("/archives/{id}/resume")
+    @ResponseStatus(HttpStatus.CREATED)
+    AgentSession.Info resumeArchived(@PathVariable String id, @RequestBody(required = false) ResumeRequest request,
+            Caller caller) {
+        ResumeRequest body = request == null ? new ResumeRequest(null, null, null) : request;
+        return sessions.resumeArchived(caller, id, body.secrets(), body.apiKey(), body.userProfile());
     }
 
     /** Closes the session; with {@code ?archive=true} its transcript is kept, to read later under /archives. */

@@ -110,6 +110,16 @@ final class AgentSession {
 
     private volatile boolean firstPrompt = true;
 
+    /** A note for the next prompt after the session was resumed: what changed around the agent; then null. */
+    private volatile String resumeNote;
+
+    /** Whether the agent offers Bob's task export and import ({@code bob/extensions}), so it can be resumed later. */
+    private volatile boolean taskTransfer;
+
+    static final String EXPORT_TASK = "_bob/task/export";
+
+    static final String IMPORT_TASK = "_bob/task/import";
+
     /** Users other than the owner who may use the session; see {@link SessionAccessPolicy}. */
     private volatile Set<String> sharedWith = Set.of();
 
@@ -149,6 +159,18 @@ final class AgentSession {
     AgentSession(DockerRuntime.ContainerSpec spec, GitRepository repository, Map<String, String> secrets,
             List<ProfileFile> userProfile, String title, String apiKey, DockerRuntime docker,
             BobCrewProperties properties) {
+        this(spec, repository, secrets, userProfile, title, apiKey, Set.of(), List.of(), docker, properties);
+    }
+
+    /**
+     * A session that goes on from an archived one ({@link #startFromArchive}).
+     * @param sharedWith who it was shared with
+     * @param history its earlier events, oldest first: the session's own go on after them
+     */
+    AgentSession(DockerRuntime.ContainerSpec spec, GitRepository repository, Map<String, String> secrets,
+            List<ProfileFile> userProfile, String title, String apiKey, Set<String> sharedWith, List<UiEvent> history,
+            DockerRuntime docker, BobCrewProperties properties) {
+        this.sharedWith = Set.copyOf(sharedWith);
         this.pendingApiKey = apiKey;
         this.ownApiKey = apiKey != null;
         this.secretNames = secrets.keySet().stream().sorted().toList();
@@ -161,7 +183,7 @@ final class AgentSession {
         this.repository = repository;
         this.docker = docker;
         this.properties = properties;
-        this.events = new EventLog(properties.eventBufferSize());
+        this.events = new EventLog(properties.eventBufferSize(), history);
     }
 
     String id() {
@@ -255,14 +277,102 @@ final class AgentSession {
      * the agent cannot be started or refuses the session
      */
     void start() {
+        launch(true, opened -> useSession(opened.newSession(
+                new AcpSchema.NewSessionRequest(DockerRuntime.WORKSPACE, List.of()))));
+        ready();
+    }
+
+    /**
+     * Starts the session of an archived one, in a new container: the repository is cloned again, and the agent's
+     * task, exported when it was archived ({@link #exportTask}), is imported and resumed, so the agent goes on
+     * with the conversation. The session's events (given to the constructor) go on after the archived ones.
+     * @param snapshot what Bob's {@code _bob/task/export} answered, as plain JSON values
+     * @throws ApiException as {@link #start}
+     */
+    void startFromArchive(String by, Object snapshot) {
+        // the conversation already had its notes
+        firstPrompt = false;
+        launch(true, opened -> {
+            String imported = importTask(opened, snapshot);
+            resumeOrStartOver(opened, imported);
+        });
+        resumeNote = "[Note: this conversation was archived and has now been resumed, in a new container. The files "
+                + "the workspace had before are gone"
+                + (repositoryPresent ? ", except the repository, cloned again at " + repository.path()
+                        + ": changes to it that were not pushed are lost" : "")
+                + ". Commands that were running then are not running now.]";
+        events.append(UiEvent.RESUMED, by, Map.of("from", "archive"));
+        log.info("Session {}: resumed from its archive by {}", id, by);
+        ready();
+    }
+
+    /**
+     * Starts the session's container again after its agent stopped unexpectedly ({@link Status#FAILED}), and
+     * resumes the agent's task in it: the container is the same, so the workspace, the agent's own records (Bob's
+     * task database) and whatever was installed are as they were. Its secrets are written again, since their
+     * tmpfs is new; which secrets it has does not change, as for {@link #refreshSecrets}. The API key is in the
+     * container's environment already. Who may do this is {@link SessionAccessPolicy}'s decision, made before.
+     * @param secrets already checked names and values
+     * @throws ApiException 409 if the session is not failed or its container is gone, 400 for a secret the
+     * session does not have, 502 if the agent cannot be started again (the container stays, for another try)
+     */
+    void restart(String by, Map<String, String> secrets) {
+        List<String> unknown = secrets.keySet().stream().filter(name -> !secretNames.contains(name)).sorted().toList();
+        if (!unknown.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "The session was not created with "
+                    + String.join(", ", unknown) + " (it has "
+                    + (secretNames.isEmpty() ? "no secrets" : String.join(", ", secretNames)) + ")");
+        }
+        synchronized (this) {
+            if (status != Status.FAILED) {
+                throw new ApiException(HttpStatus.CONFLICT, "The session is " + status.name().toLowerCase()
+                        + "; only a session whose agent stopped can be restarted");
+            }
+            if (containerId == null || acpSessionId == null || !docker.exists(containerId)) {
+                throw new ApiException(HttpStatus.CONFLICT, "This session's container is gone, or its agent never "
+                        + "started a conversation, so there is nothing to resume; close it and start a new one");
+            }
+            pendingSecrets = Map.copyOf(secrets);
+            secretsFailure = null;
+            setStatus(Status.STARTING);
+        }
+        AcpSyncClient previous = client;
+        closeQuietly(previous);
+        String task = acpSessionId;
+        launch(false, opened -> resumeOrStartOver(opened, task));
+        resumeNote = "[Note: your container stopped unexpectedly and has been started again. The workspace's files "
+                + "are as they were, but commands that were running then are not running now.]";
+        events.append(UiEvent.RESUMED, by, Map.of("from", "crash"));
+        log.info("Session {}: restarted by {}", id, by);
+        ready();
+    }
+
+    /** What opens the agent's session once ACP is initialized: a new one, or a task resumed. */
+    @FunctionalInterface
+    private interface Opener {
+        void open(AcpSyncClient client);
+    }
+
+    /**
+     * Connects to the session's container (created first when {@code create}), initializes ACP and opens the
+     * agent's session. On failure the session is {@link Status#FAILED}; a container this call created is
+     * removed, one that was there already (a restart) is kept for another try.
+     */
+    private void launch(boolean create, Opener opener) {
         try {
-            String apiKey = pendingApiKey;
-            pendingApiKey = null;
-            String created = docker.create(spec, apiKey);
-            this.containerId = created;
-            ContainerAcpTransport transport = new ContainerAcpTransport(docker, created,
+            String container;
+            if (create) {
+                String apiKey = pendingApiKey;
+                pendingApiKey = null;
+                container = docker.create(spec, apiKey);
+                this.containerId = container;
+            } else {
+                container = containerId;
+            }
+            // connect attaches before it starts the container (an exited one too), so that no output is lost
+            ContainerAcpTransport transport = new ContainerAcpTransport(docker, container,
                     line -> agentStderr.debug("[{}] {}", id, line), reason -> onAgentExit(),
-                    () -> writeSecrets(created));
+                    () -> writeSecrets(container));
             AcpSyncClient newClient = AcpClient.sync(transport)
                 .requestTimeout(properties.requestTimeout())
                 .promptTimeout(properties.promptTimeout())
@@ -278,8 +388,9 @@ final class AgentSession {
                 AcpSchema.Implementation info = initialized.agentInfo();
                 this.agentName = (info.title() != null ? info.title() : info.name()) + " " + info.version();
             }
-            if (repository != null) {
-                docker.cloneRepository(created, repository, properties.git().cloneTimeout());
+            this.taskTransfer = offersTaskTransfer(initialized);
+            if (create && repository != null) {
+                docker.cloneRepository(container, repository, properties.git().cloneTimeout());
                 repositoryPresent = true;
                 Map<String, Object> cloned = new LinkedHashMap<>();
                 cloned.put("url", repository.url());
@@ -289,28 +400,120 @@ final class AgentSession {
                 cloned.put("path", repository.path());
                 events.append(UiEvent.REPOSITORY_CLONED, null, cloned);
             }
-            useSession(newClient.newSession(new AcpSchema.NewSessionRequest(DockerRuntime.WORKSPACE, List.of())));
+            opener.open(newClient);
         } catch (ApiException e) {
-            setStatus(Status.FAILED);
-            shutdown();
+            failToStart(create);
             throw e;
         } catch (RuntimeException e) {
             pendingSecrets = null;
             pendingUserProfile = null;
+            failToStart(create);
             if (secretsFailure != null) {
-                setStatus(Status.FAILED);
-                shutdown();
                 throw secretsFailure;
             }
             log.warn("Session {}: the agent could not be started: {}", id, e.toString());
-            setStatus(Status.FAILED);
-            shutdown();
             throw new ApiException(HttpStatus.BAD_GATEWAY, "The agent could not start a session: " + rootMessage(e));
         }
-        synchronized (this) {
-            // the container may already have died while starting
-            if (status == Status.STARTING) {
-                setStatus(Status.IDLE);
+    }
+
+    private void failToStart(boolean created) {
+        setStatus(Status.FAILED);
+        if (created) {
+            shutdown();
+        } else {
+            cancelPendingPermissions();
+            closeQuietly(client);
+        }
+    }
+
+    private synchronized void ready() {
+        // the container may already have died while starting
+        if (status == Status.STARTING) {
+            setStatus(Status.IDLE);
+        }
+    }
+
+    /**
+     * Opens the agent's task {@code task} with {@code session/resume}, which does not replay it: the session's own
+     * events already show it. When the agent cannot (it does not have the task, or does not resume at all), the
+     * session goes on with a new conversation, and an event says so, rather than failing a session whose container
+     * works.
+     */
+    private void resumeOrStartOver(AcpSyncClient opened, String task) {
+        if (task != null) {
+            try {
+                AcpSchema.ResumeSessionResponse resumed = opened.resumeSession(
+                        new AcpSchema.ResumeSessionRequest(task, DockerRuntime.WORKSPACE, List.of()));
+                this.acpSessionId = task;
+                useModes(resumed.modes());
+                return;
+            } catch (AcpConnectionException e) {
+                throw e;
+            } catch (RuntimeException e) {
+                log.warn("Session {}: the agent did not resume its task: {}", id, e.toString());
+            }
+        }
+        events.append(UiEvent.ERROR, null, Map.of("message", "The agent could not resume its conversation, so this "
+                + "is a new one: it does not know what was said before."));
+        firstPrompt = true;
+        useSession(opened.newSession(new AcpSchema.NewSessionRequest(DockerRuntime.WORKSPACE, List.of())));
+    }
+
+    /** Bob's {@code _bob/task/import}: the archived task, copied into this agent; null if it cannot. */
+    private String importTask(AcpSyncClient opened, Object snapshot) {
+        if (!taskTransfer || snapshot == null) {
+            return null;
+        }
+        try {
+            Object answer = opened.sendExtRequest(IMPORT_TASK,
+                    Map.of("cwd", DockerRuntime.WORKSPACE, "snapshot", snapshot));
+            if (answer instanceof Map<?, ?> result && result.get("sessionIds") instanceof List<?> ids && !ids.isEmpty()
+                    && ids.get(0) instanceof String imported) {
+                return imported;
+            }
+            log.warn("Session {}: the agent's import answered no task", id);
+        } catch (AcpConnectionException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            log.warn("Session {}: the agent did not import the archived task: {}", id, e.toString());
+        }
+        return null;
+    }
+
+    /**
+     * The agent's own record of the conversation, for an archive to resume it later: Bob's {@code _bob/task/export}
+     * of the current task, as plain JSON values. Null when the agent does not offer it or is not running.
+     */
+    Object exportTask() {
+        AcpSyncClient current = client;
+        String task = acpSessionId;
+        if (!taskTransfer || current == null || task == null || (status != Status.IDLE && status != Status.RUNNING)) {
+            return null;
+        }
+        try {
+            return current.sendExtRequest(EXPORT_TASK, Map.of("sessionId", task));
+        } catch (RuntimeException e) {
+            log.warn("Session {}: the agent did not export its task: {}", id, e.toString());
+            return null;
+        }
+    }
+
+    /** Bob advertises its task-transfer requests as {@code agentCapabilities._meta["bob/extensions"].version}. */
+    private static boolean offersTaskTransfer(AcpSchema.InitializeResponse initialized) {
+        AcpSchema.AgentCapabilities capabilities = initialized.agentCapabilities();
+        if (capabilities == null || capabilities.meta() == null) {
+            return false;
+        }
+        return capabilities.meta().get("bob/extensions") instanceof Map<?, ?> extensions
+                && extensions.get("version") instanceof Number version && version.intValue() >= 1;
+    }
+
+    private void closeQuietly(AcpSyncClient old) {
+        if (old != null) {
+            try {
+                old.close();
+            } catch (RuntimeException e) {
+                log.debug("Session {}: closing the old client failed: {}", id, e.toString());
             }
         }
     }
@@ -334,13 +537,13 @@ final class AgentSession {
 
     private void useSession(AcpSchema.NewSessionResponse created) {
         this.acpSessionId = created.sessionId();
-        if (created.modes() != null) {
-            this.currentMode = created.modes().currentModeId();
-            this.modes = created.modes()
-                .availableModes()
-                .stream()
-                .map(mode -> new Mode(mode.id(), mode.name()))
-                .toList();
+        useModes(created.modes());
+    }
+
+    private void useModes(AcpSchema.SessionModeState state) {
+        if (state != null) {
+            this.currentMode = state.currentModeId();
+            this.modes = state.availableModes().stream().map(mode -> new Mode(mode.id(), mode.name())).toList();
         }
     }
 
@@ -490,6 +693,11 @@ final class AgentSession {
         }
         if (isFirst && !secretNames.isEmpty()) {
             notes.append(secretsNote()).append("\n\n");
+        }
+        String resumed = resumeNote;
+        if (resumed != null) {
+            resumeNote = null;
+            notes.append(resumed).append("\n\n");
         }
         return List.of(new AcpSchema.TextContent(notes + text));
     }

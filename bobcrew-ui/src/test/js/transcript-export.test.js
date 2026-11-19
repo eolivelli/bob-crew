@@ -70,6 +70,17 @@ assert(workspace.includes('repository https://github.com/a/&lt;b&gt; (main)'));
 assert(workspace.includes('capabilities docker, &lt;x&gt;'), 'capabilities are shown, escaped');
 assert(!html.includes('capabilities'));
 
+// a resumed session says how it was resumed, and by whom (escaped in the export)
+assert.strictEqual(ctx.resumedText({ user: 'alice', data: { from: 'crash' } }),
+  'alice restarted the session after its agent stopped; the conversation goes on');
+assert.strictEqual(ctx.resumedText({ user: 'bob', data: { from: 'archive' } }),
+  'bob resumed the session from its archive, in a new container');
+assert.strictEqual(ctx.resumedText({ data: {} }), 'someone resumed the session');
+const resumedHtml = ctx.buildTranscriptHtml({ title: 't', id: 'x', owner: 'o', image: 'i' },
+  [ev(1, 'resumed', { from: 'archive' }, evil)], { user: 'u', when: new Date('2026-11-13T10:00:00Z') });
+assert(resumedHtml.includes('resumed the session from its archive'));
+assert(!resumedHtml.includes('<script>alert(1)'), 'the user name is escaped');
+
 // what a copy button puts on the clipboard for a box of several parts
 assert.strictEqual(ctx.joinParts(['Run tests', null, '', '  \n', 'mvn test\n', undefined, 'BUILD SUCCESS\n\n']),
   'Run tests\n\nmvn test\n\nBUILD SUCCESS');
