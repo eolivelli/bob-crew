@@ -1,7 +1,7 @@
 'use strict';
 
 // The attention bell: a short tone, made with the Web Audio API so that there is no sound file to serve,
-// when the selected session needs the user and the page is in the background.
+// when the selected session needs the user, whether the page is in front or in the background.
 
 /** Event types that mean the agent waits for the user, or has stopped. */
 function bellEventTypes() {
@@ -12,8 +12,8 @@ function bellEventTypes() {
  * Whether an event rings the bell. `baseline` is the last sequence number the session had before the page
  * started listening, so that the replay of old events (the stream starts at the beginning) stays silent.
  */
-function shouldRing(event, enabled, hidden, baseline) {
-  if (!enabled || !hidden) return false;
+function shouldRing(event, enabled, baseline) {
+  if (!enabled) return false;
   if (baseline === null || baseline === undefined) return false;
   if (!event || !(event.seq > baseline)) return false;
   return bellEventTypes().includes(event.type);

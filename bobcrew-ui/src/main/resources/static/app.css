@@ -12,10 +12,13 @@
   --warn: #b25e09;
   --bad: #c0352b;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light dark;
 }
 
+/* The theme selector sets data-theme on the root element (theme.js); without it the browser's setting decides.
+   The dark colours are therefore here twice: for the browser's setting, and for the choice "dark". */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     --bg: #14171c;
     --panel: #1c2027;
     --border: #2f3540;
@@ -29,6 +32,24 @@
     --warn: #f0a44b;
     --bad: #ff7b72;
   }
+}
+
+:root[data-theme=light] { color-scheme: light; }
+
+:root[data-theme=dark] {
+  color-scheme: dark;
+  --bg: #14171c;
+  --panel: #1c2027;
+  --border: #2f3540;
+  --text: #e6e9ee;
+  --muted: #98a2b3;
+  --accent: #4589ff;
+  --accent-text: #0b0d10;
+  --user: #1f2f4d;
+  --thought: #23272f;
+  --ok: #4cc38a;
+  --warn: #f0a44b;
+  --bad: #ff7b72;
 }
 
 * { box-sizing: border-box; }
@@ -93,6 +114,9 @@ body.logged-out main > :not(#login-view) { display: none !important; }
 #new-session label.field { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 6px; }
 #new-session label.field input { min-width: 0; }
 #new-limits { margin: 0; font-size: 12px; }
+
+#theme { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+#theme select { flex: 1; min-width: 0; }
 
 #show-roles { margin: 8px 16px; }
 #refresh-all-secrets { margin: 0 16px 8px; }

@@ -215,6 +215,19 @@ class UiProxyTest {
     }
 
     @Test
+    void servesTheThemeSelector() throws Exception {
+        // the choice and its storage are checked by src/test/js/theme.test.js; the script is in the head, so that the
+        // theme is set before the page is painted (an inline script would be refused by the Content-Security-Policy)
+        String page = get("/").body();
+        assertThat(page).contains("id=\"theme-select\"").contains("value=\"dark\"").contains("src=\"theme.js\"");
+        assertThat(page.indexOf("src=\"theme.js\"")).isLessThan(page.indexOf("<body>"));
+        HttpResponse<String> script = get("/theme.js");
+        assertThat(script.statusCode()).isEqualTo(200);
+        assertThat(script.body()).contains("function applyTheme").doesNotContain(TOKEN);
+        assertThat(get("/app.css").body()).contains(":root[data-theme=dark]");
+    }
+
+    @Test
     void servesThePageWithTheRoleControls() throws Exception {
         // the behaviour is in app.js and is checked by hand; here only that the page offers it
         assertThat(get("/").body()).contains("id=\"new-role\"").contains("id=\"show-roles\"").contains("id=\"roles-view\"");

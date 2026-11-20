@@ -29,7 +29,7 @@ const state = {
   permissions: new Map(),
   streaming: null,      // {kind, body}: the message that chunks are appended to
   plan: null,           // the plan card of the current turn
-  bellEnabled: readBellPreference(), // ring when the agent needs the user and the tab is in the background
+  bellEnabled: readBellPreference(), // ring when the agent needs the user
   bellBaseline: null,   // the selected session's last event number before the page listened to it
   selection: 0,         // counts selections, so that a late answer for an earlier one is dropped
   status: null,         // the selected session's status
@@ -355,7 +355,7 @@ async function openEvents(id, server) {
     const event = JSON.parse(message.data);
     state.events.push(event);
     render(event);
-    if (shouldRing(event, state.bellEnabled, document.hidden, state.bellBaseline)) playBell();
+    if (shouldRing(event, state.bellEnabled, state.bellBaseline)) playBell();
   };
   source.addEventListener('end', () => {
     source.close();
@@ -732,6 +732,13 @@ $('session-mode').addEventListener('change', async (change) => {
     notify(e.message);
     refreshSessions();
   }
+});
+
+// The theme: the choice is remembered in this browser; theme.js already applied it when the page loaded.
+$('theme-select').value = readThemeChoice();
+$('theme-select').addEventListener('change', (change) => {
+  saveThemeChoice(change.target.value);
+  applyTheme(change.target.value);
 });
 
 // The attention bell: off until the user switches it on, and then remembered in this browser.

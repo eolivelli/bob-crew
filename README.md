@@ -463,10 +463,14 @@ session is missing. The file has no scripts and carries a Content-Security-Polic
 network access.
 
 The **Bell** checkbox in a session's header (off by default) plays a short two-note sound when the
-selected session needs you: its turn ended, it asks for a permission, or it failed. It rings only while the
-browser tab is in the background, and only for the session you have open; opening a session never rings for
-what it already holds. The sound is made in the browser (no audio file), and the choice is remembered in
-that browser.
+selected session needs you: its turn ended, it asks for a permission, or it failed. It rings whether the
+browser tab is in front or in the background, but only for the session you have open; opening a session
+never rings for what it already holds. The sound is made in the browser (no audio file), and the choice is
+remembered in that browser.
+
+The **Theme** selector at the bottom of the sidebar chooses the colours: *System* (the default, follows the
+browser's light or dark setting), *Light* or *Dark*. The choice is remembered in that browser (`localStorage`,
+key `bobcrew.theme`; *System* stores nothing).
 
 ## Uploading files
 
