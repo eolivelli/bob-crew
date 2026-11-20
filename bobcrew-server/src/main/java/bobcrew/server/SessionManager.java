@@ -597,6 +597,17 @@ public class SessionManager {
         return info;
     }
 
+    /**
+     * Compacts the session's conversation: the agent summarises it, then goes on from the summary in a new session.
+     * It returns once the summary turn has started.
+     * @throws ApiException 409 if busy
+     */
+    void compact(Caller caller, String id, String instructions) {
+        AgentSession session = get(caller, id);
+        session.compact(caller.name(), instructions);
+        log.info("Session {}: compaction asked by {}", id, caller.name());
+    }
+
     /** A snapshot of the session container's resource use. */
     ContainerMetrics metrics(Caller caller, String id) {
         return get(caller, id).metrics();

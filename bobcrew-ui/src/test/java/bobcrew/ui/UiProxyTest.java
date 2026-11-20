@@ -196,7 +196,7 @@ class UiProxyTest {
     @Test
     void servesTheTranscriptExportAndLinks() throws Exception {
         // the behaviour itself is checked by src/test/js/transcript-export.test.js and links.test.js
-        assertThat(get("/").body()).contains("id=\"export\"").contains("id=\"clear\"").contains("src=\"transcript-export.js\"")
+        assertThat(get("/").body()).contains("id=\"export\"").contains("id=\"clear\"").contains("id=\"compact\"").contains("src=\"transcript-export.js\"")
             .contains("src=\"links.js\"");
         assertThat(get("/links.js").body()).contains("function linkify");
         HttpResponse<String> script = get("/transcript-export.js");

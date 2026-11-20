@@ -975,6 +975,63 @@ class ServerIntegrationTest {
     }
 
     @Test
+    void compactingSummarisesTheConversationAndGoesOnFromTheSummaryInANewSession() throws Exception {
+        String id = createSession(null).get("id").asString();
+        ask(id, "lighthouse");
+        share(id, alice, "carol");
+        long before = JSON.readTree(send("GET", "/sessions/" + id, null, alice).body()).get("lastSeq").asLong();
+
+        HttpResponse<String> compact = send("POST", "/sessions/" + id + "/compact",
+                "{\"instructions\":\"keep the colours\"}", token("carol"));
+        assertThat(compact.statusCode()).as(compact.body()).isEqualTo(202);
+        List<JsonNode> compaction = events(id, before, event -> isStatus(event, "IDLE"));
+        assertThat(types(compaction)).startsWith("compacting", "status").contains("turn_end", "compacted")
+            .doesNotContain("error", "user_prompt");
+        JsonNode compacting = compaction.get(0);
+        assertThat(compacting.get("user").asString()).isEqualTo("carol");
+        assertThat(compacting.get("data").get("instructions").asString()).isEqualTo("keep the colours");
+        // the agent's summary is in the transcript, as its answer
+        assertThat(agentText(compaction)).startsWith("Summary: ").contains("lighthouse");
+
+        // the agent goes on in a new session (an empty task), which gets the summary and the first prompt's notes
+        String text = ask(id, "recall");
+        assertThat(text).contains("remembered:  ", "the conversation so far was compacted", "Summary: ", "lighthouse");
+        // only once
+        String second = ask(id, "recall");
+        assertThat(second.substring(second.indexOf("You said:"))).doesNotContain("compacted");
+
+        // the transcript keeps what came before the compaction
+        assertThat(events(id, 0, event -> event.get("seq").asLong() >= before).stream()
+            .filter(event -> "user_prompt".equals(event.get("type").asString()))
+            .map(event -> event.get("data").get("text").asString())).contains("lighthouse");
+    }
+
+    @Test
+    void aStoppedCompactionLeavesTheConversationAsItWas() throws Exception {
+        String id = createSession(null).get("id").asString();
+        ask(id, "lighthouse");
+        long before = JSON.readTree(send("GET", "/sessions/" + id, null, alice).body()).get("lastSeq").asLong();
+
+        assertThat(send("POST", "/sessions/" + id + "/compact", "{\"instructions\":\"be slow\"}", alice).statusCode())
+            .isEqualTo(202);
+        events(id, before, event -> "agent_message_chunk".equals(updateKind(event)));
+        assertThat(send("POST", "/sessions/" + id + "/compact", null, alice).statusCode()).isEqualTo(409);
+        assertThat(send("POST", "/sessions/" + id + "/prompt", "{\"text\":\"hi\"}", alice).statusCode()).isEqualTo(409);
+        send("POST", "/sessions/" + id + "/cancel", null, alice);
+
+        List<JsonNode> stopped = events(id, before, event -> isStatus(event, "IDLE"));
+        assertThat(types(stopped)).doesNotContain("compacted");
+        assertThat(stopped.stream().filter(event -> "error".equals(event.get("type").asString())).findFirst()
+            .orElseThrow().get("data").get("message").asString())
+            .contains("not compacted", "cancelled", "goes on as before");
+        // the same task as before: it remembers the prompt
+        assertThat(ask(id, "recall")).contains("remembered: ").contains("lighthouse").doesNotContain("compacted");
+
+        assertThat(send("POST", "/sessions/no-such-session/compact", null, alice).statusCode()).isEqualTo(404);
+        assertThat(send("POST", "/sessions/" + id + "/compact", null, null).statusCode()).isEqualTo(401);
+    }
+
+    @Test
     void limitsTheNumberOfSessionsPerUserAndInAll() throws Exception {
         createSession("limit-1");
         createSession("limit-2");

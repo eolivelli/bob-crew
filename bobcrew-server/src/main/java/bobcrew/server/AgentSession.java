@@ -113,6 +113,15 @@ final class AgentSession {
     /** A note for the next prompt after the session was resumed: what changed around the agent; then null. */
     private volatile String resumeNote;
 
+    /**
+     * After a compaction: the summary the agent wrote of the conversation before it, which goes before the next
+     * prompt, since the agent's new task knows nothing else; then null.
+     */
+    private volatile String compactNote;
+
+    /** While a compaction's summary turn runs: the agent's message so far, which is the summary; null otherwise. */
+    private volatile StringBuilder compactionSummary;
+
     /** Whether the agent offers Bob's task export and import ({@code bob/extensions}), so it can be resumed later. */
     private volatile boolean taskTransfer;
 
@@ -589,6 +598,7 @@ final class AgentSession {
                         + "; it can only be cleared when idle (stop the running turn first)");
             }
             firstPrompt = true;
+            compactNote = null;
             setStatus(Status.STARTING);
         }
         try {
@@ -660,6 +670,131 @@ final class AgentSession {
     }
 
     /**
+     * Compacts the conversation, as Bob Shell's {@code /compact} does in its terminal, which its ACP server does not
+     * offer: the agent is asked, in a turn of its own, for a summary of the conversation (Bob's own template, plus
+     * the user's instructions if any), then a fresh ACP session (for Bob, a new task) takes the old one's place in
+     * the same container, and the summary goes before the next prompt, with the notes a first prompt carries. The
+     * transcript stays as it is: the summary is in it, between a {@link UiEvent#COMPACTING} and a
+     * {@link UiEvent#COMPACTED} event. The summary turn runs like any other (status RUNNING, Stop works); if it is
+     * stopped, fails or writes nothing, or the agent refuses the new session, an {@code error} event says so and the
+     * conversation goes on as before. It returns at once.
+     * @param instructions what the summary should keep or focus on, or null
+     * @throws ApiException with 409 if the session is not idle
+     */
+    void compact(String user, String instructions) {
+        synchronized (this) {
+            if (status != Status.IDLE) {
+                throw new ApiException(HttpStatus.CONFLICT, "The session is " + status.name().toLowerCase()
+                        + "; it can only be compacted when idle (stop the running turn first)");
+            }
+            compactionSummary = new StringBuilder();
+            events.append(UiEvent.COMPACTING, user,
+                    instructions == null ? Map.of() : Map.of("instructions", instructions));
+            setStatus(Status.RUNNING);
+        }
+        Thread.ofVirtual().name("compact-" + id).start(() -> {
+            String failure = null;
+            try {
+                AcpSchema.PromptResponse response = client.prompt(new AcpSchema.PromptRequest(acpSessionId,
+                        List.of(new AcpSchema.TextContent(compactionPrompt(instructions)))));
+                events.append(UiEvent.TURN_END, null, Map.of("stopReason", response.stopReason()));
+                String summary = compactionSummary.toString().strip();
+                String stopReason = response.stopReason() == null ? "" : response.stopReason().value();
+                if (!"end_turn".equals(stopReason)) {
+                    failure = "the agent did not finish the summary (" + stopReason + ")";
+                } else if (summary.isEmpty()) {
+                    failure = "the agent wrote no summary";
+                } else {
+                    failure = continueFromSummary(user, summary);
+                }
+            } catch (AcpConnectionException e) {
+                onAgentExit();
+            } catch (RuntimeException e) {
+                if (timedOut(e)) {
+                    onPromptTimeout();
+                    failure = "the summary took too long";
+                } else {
+                    log.warn("Session {}: the compaction's summary failed: {}", id, e.toString());
+                    failure = rootMessage(e);
+                }
+            } finally {
+                compactionSummary = null;
+                cancelPendingPermissions();
+            }
+            if (failure != null) {
+                events.append(UiEvent.ERROR, null, Map.of("message",
+                        "The conversation was not compacted: " + failure + ". It goes on as before."));
+            }
+            synchronized (this) {
+                if (status == Status.RUNNING) {
+                    setStatus(Status.IDLE);
+                }
+            }
+        });
+    }
+
+    /** Bob's compaction prompt (its {@code /compact}), so that the summary is the one Bob itself would write. */
+    static String compactionPrompt(String instructions) {
+        String prompt = """
+                The conversation is about to be compacted: it will go on in a new session, from a summary you write \
+                now. Do not run any tools; reply with the summary only.
+
+                Provide a detailed summary for continuing this conversation.
+                Focus on information helpful for continuation: what was done, what is being worked on, which files \
+                are involved, and what's next.
+
+                Use this template:
+                ---
+                ## Goal
+                [What goal(s) is the user trying to accomplish?]
+
+                ## Instructions
+                [Important instructions the user gave that are still relevant]
+                [If there is a plan or spec, include info so next agent can continue using it]
+
+                ## Discoveries
+                [Notable things learned during this conversation useful for continuing]
+
+                ## Accomplished
+                [What work has been completed, what's in progress, what's left?]
+
+                ## Relevant files / directories
+                [Structured list of relevant files read, edited, or created]
+                ---""";
+        return instructions == null ? prompt : prompt + "\n\nAdditional instructions from the user:\n" + instructions;
+    }
+
+    /**
+     * Opens the agent's new session after a compaction, in the mode the old one was in; returns why it could not, or
+     * null. The status is still RUNNING, so no prompt gets in meanwhile.
+     */
+    private String continueFromSummary(String user, String summary) {
+        String mode = currentMode;
+        AcpSchema.NewSessionResponse created;
+        try {
+            created = client.newSession(new AcpSchema.NewSessionRequest(DockerRuntime.WORKSPACE, List.of()));
+        } catch (RuntimeException e) {
+            log.warn("Session {}: the agent refused a new session for the compaction: {}", id, e.toString());
+            return "the agent could not start a new session (" + rootMessage(e) + ")";
+        }
+        useSession(created);
+        if (mode != null && !mode.equals(currentMode) && modes.stream().anyMatch(known -> known.id().equals(mode))) {
+            try {
+                client.setSessionMode(new AcpSchema.SetSessionModeRequest(acpSessionId, mode));
+                currentMode = mode;
+            } catch (RuntimeException e) {
+                log.warn("Session {}: the new session did not take mode {}: {}", id, mode, e.toString());
+            }
+        }
+        firstPrompt = true;
+        compactNote = "[Note: to keep the context small, the conversation so far was compacted. You are going on from "
+                + "this summary of it, which you wrote:]\n\n" + summary;
+        events.append(UiEvent.COMPACTED, user, Map.of("summaryLength", summary.length()));
+        log.info("Session {}: compacted by {}", id, user);
+        return null;
+    }
+
+    /**
      * The turn outlasted {@code bobcrew.prompt-timeout}. The SDK has given up on the prompt and told the agent with
      * {@code $/cancel_request}, which agents such as Bob do not act on: the agent would go on working in a session
      * that says it is idle. So it is asked to stop the way ACP defines for a turn, {@code session/cancel}, and the
@@ -725,6 +860,11 @@ final class AgentSession {
         if (resumed != null) {
             resumeNote = null;
             notes.append(resumed).append("\n\n");
+        }
+        String compacted = compactNote;
+        if (compacted != null) {
+            compactNote = null;
+            notes.append(compacted).append("\n\n[End of the summary. The user's new message follows.]\n\n");
         }
         return List.of(new AcpSchema.TextContent(notes + text));
     }
@@ -888,6 +1028,13 @@ final class AgentSession {
         AcpSchema.SessionUpdate update = notification.update();
         if (update instanceof AcpSchema.CurrentModeUpdate modeUpdate) {
             this.currentMode = modeUpdate.currentModeId();
+        }
+        StringBuilder summary = compactionSummary;
+        if (summary != null && update instanceof AcpSchema.AgentMessageChunk chunk
+                && chunk.content() instanceof AcpSchema.TextContent text && text.text() != null) {
+            synchronized (summary) {
+                summary.append(text.text());
+            }
         }
         events.append(UiEvent.UPDATE, null, update);
         touch();

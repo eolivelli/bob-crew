@@ -267,14 +267,14 @@ button.active { border-color: var(--accent); color: var(--accent); }
 #role-dialog dd { margin: 0; overflow-wrap: anywhere; }
 #role-dialog pre { max-height: 40vh; margin: 0 0 12px; padding: 10px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 #role-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
-#upload-dialog, #clear-dialog, #close-dialog, #role-dialog {
+#upload-dialog, #clear-dialog, #compact-dialog, #close-dialog, #role-dialog {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
   max-width: 480px;
 }
-#clear-dialog::backdrop, #close-dialog::backdrop, #upload-dialog::backdrop, #role-dialog::backdrop { background: rgb(0 0 0 / 40%); }
+#clear-dialog::backdrop, #compact-dialog::backdrop, #close-dialog::backdrop, #upload-dialog::backdrop, #role-dialog::backdrop { background: rgb(0 0 0 / 40%); }
 #upload-dialog label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
 #upload-dialog input { font: inherit; color: var(--text); }
 #upload-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
@@ -284,6 +284,11 @@ button.active { border-color: var(--accent); color: var(--accent); }
 #clear-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
 #clear-dialog button[value=keep] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 #clear-dialog button.danger { color: var(--bad); }
+#compact-dialog label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
+#compact-dialog textarea { font: inherit; color: var(--text); resize: vertical; }
+#compact-dialog .hint { color: var(--muted); font-size: 13px; }
+#compact-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
+#compact-dialog button[value=compact] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 #close-dialog .hint { color: var(--muted); font-size: 13px; }
 #close-dialog button { background: var(--panel); color: var(--text); border-color: var(--border); }
 #close-dialog button[value=archive] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }

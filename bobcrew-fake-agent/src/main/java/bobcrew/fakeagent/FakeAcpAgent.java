@@ -44,6 +44,10 @@ import tools.jackson.databind.node.ObjectNode;
  * <li>anything else: think, then echo the prompt back word by word</li>
  * </ul>
  *
+ * <p>A prompt starting with {@value #COMPACTION} (bob-crew's compaction) is not read for keywords and not kept in the
+ * task: the answer is a summary, {@code "Summary: "} and the task's prompts, or, if the user's instructions say
+ * {@code slow}, ticks until cancelled.
+ *
  * <p>Like Bob, it keeps each session's task on disk ({@code $HOME/.fake-agent/tasks/<session id>}: its prompts, one per
  * line), so that a container restarted after a crash can {@code session/resume} it. It also offers Bob's task-transfer
  * extension: it advertises {@code agentCapabilities._meta["bob/extensions"] = {"version": 1}} and answers
@@ -53,6 +57,9 @@ import tools.jackson.databind.node.ObjectNode;
 public final class FakeAcpAgent {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
+
+    /** How bob-crew's compaction prompt starts. */
+    static final String COMPACTION = "The conversation is about to be compacted";
 
     private final PrintStream out;
     private final AtomicLong nextRequestId = new AtomicLong(1000);
@@ -254,6 +261,9 @@ public final class FakeAcpAgent {
         String prompt = text.toString();
         String lower = prompt.toLowerCase();
 
+        if (prompt.startsWith(COMPACTION)) {
+            return summarize(sessionId, prompt, stop);
+        }
         chunk(sessionId, "agent_thought_chunk", "Thinking about: " + prompt);
 
         if (isTaskId(sessionId) && Files.isRegularFile(taskFile(sessionId))) {
@@ -341,6 +351,25 @@ public final class FakeAcpAgent {
             }
             chunk(sessionId, "agent_message_chunk", word + " ");
         }
+        return stopReason("end_turn");
+    }
+
+    /** Answers bob-crew's compaction prompt with a summary of the task: its prompts. */
+    private ObjectNode summarize(String sessionId, String prompt, AtomicBoolean stop) throws Exception {
+        int instructions = prompt.indexOf("Additional instructions from the user:");
+        if (instructions >= 0 && prompt.substring(instructions).toLowerCase().contains("slow")) {
+            for (int i = 0; i < 600; i++) {
+                if (stop.get()) {
+                    return stopReason("cancelled");
+                }
+                chunk(sessionId, "agent_message_chunk", "tick " + i + " ");
+                Thread.sleep(100);
+            }
+        }
+        List<String> prompts = isTaskId(sessionId) && Files.isRegularFile(taskFile(sessionId))
+                ? loadTask(sessionId) : List.of();
+        chunk(sessionId, "agent_message_chunk", "Summary: ");
+        chunk(sessionId, "agent_message_chunk", String.join(" | ", prompts));
         return stopReason("end_turn");
     }
 

@@ -19,7 +19,9 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * values of the secrets {@code data.names}) or {@code resumed} (a user started the session's agent again:
  * {@code data.from} is {@code crash}, after it stopped unexpectedly, or {@code archive}, from the session's archive)
  * or {@code user_profile_refreshed} (a user re-sent the user profile files; {@code data.count} is the number of
- * files written)
+ * files written) or {@code compacting} (a user asked for the conversation to be compacted; {@code data.instructions},
+ * if any, are theirs; the agent's summary follows, as a turn) or {@code compacted} (the agent goes on from that
+ * summary, in a new session of its own)
  * @param user who caused it, for events caused by a user
  * @param data the details, depending on the type
  */
@@ -54,4 +56,10 @@ public record UiEvent(long seq, Instant time, String type, String user, Object d
     public static final String RESUMED = "resumed";
 
     public static final String USER_PROFILE_REFRESHED = "user_profile_refreshed";
+
+    /** A user asked for the conversation to be compacted; the agent's summary turn follows. */
+    public static final String COMPACTING = "compacting";
+
+    /** The conversation was compacted: the agent goes on from the summary, in a new session. */
+    public static final String COMPACTED = "compacted";
 }

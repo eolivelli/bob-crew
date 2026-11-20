@@ -89,6 +89,7 @@
       <label id="bell" title="Play a sound when the agent needs you (a turn ended, a permission is asked, an error)"><input id="bell-toggle" type="checkbox"> Bell</label>
       <button id="export" type="button" title="Download the whole session as a gzipped HTML file">Export transcript</button>
       <button id="cancel" type="button" class="live-only">Stop</button>
+      <button id="compact" type="button" class="live-only" title="Have the agent summarise the conversation and go on from the summary, to free its context window; the transcript stays">Compact</button>
       <button id="clear" type="button" class="danger live-only" title="Start the conversation over, optionally deleting the workspace's files; the session stays open">Clear</button>
       <button id="refresh-secrets" type="button" class="live-only" title="Replace this session's secrets with the values now in ~/.bobcrew/secrets.json, for example after replacing an expired GitHub token (owner only)">Refresh secrets</button>
       <button id="refresh-user-profile" type="button" class="live-only" title="Re-send the files in ~/.bobcrew/user-profile to this session, for example after updating an AWS credentials file (owner only)">Refresh user profile</button>
@@ -122,6 +123,20 @@
       <div class="dialog-buttons">
         <button value="keep" type="submit">Clear conversation, keep files</button>
         <button value="wipe" class="danger" type="submit">Clear and delete workspace files</button>
+        <button value="cancel" type="submit" class="plain">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="compact-dialog">
+    <form method="dialog">
+      <p>Compact the conversation? The agent writes a summary of it, then goes on from the summary alone, which
+        frees its context window. The transcript here stays as it is.</p>
+      <label>Instructions for the summary (optional)
+        <textarea id="compact-instructions" rows="3" maxlength="100000"
+          placeholder="e.g. keep the list of failing tests"></textarea></label>
+      <p class="hint">The summary is a turn of its own; Stop cancels it, and the conversation then goes on as before.</p>
+      <div class="dialog-buttons">
+        <button value="compact" type="submit">Compact</button>
         <button value="cancel" type="submit" class="plain">Cancel</button>
       </div>
     </form>

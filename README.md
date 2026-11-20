@@ -109,7 +109,9 @@ Node.js 22 and Linux Homebrew. Its entrypoint, `bobcrew-entrypoint`, is the cont
 - Bob Shell's limit of 100 agentic turns per task is switched off (`session.maxTurns` is `0` in
   `~/.bob/settings/settings.json`, by `profile.d/30-bob-settings.sh`), so that long jobs are not stopped
   halfway. A `settings.json` among the [user profile files](#user-profile-files) that sets `session.maxTurns`
-  keeps its value.
+  keeps its value. Images built before this was added still stop at 100 turns ("Task limit reached"): rebuild
+  them (`scripts/build-images.sh`) and copy them to the server (`scripts/push-images.sh`). To check an image:
+  `docker run --rm --entrypoint ls bobcrew/bob-base /etc/bobcrew/profile.d` lists `30-bob-settings.sh`.
 
 `bobcrew/bob-java-python` ([`docker/bob-java-python`](docker/bob-java-python/Dockerfile)) is the
 development template: JDK 21, Maven 3.9 and Python 3.11 (`python`, `python3` and `pip` are 3.11). It is
@@ -158,7 +160,8 @@ stopped), `background` (ends the turn, then keeps sending text until stopped), `
 user, uid and directory), `showenv NAME` (an environment variable),
 `writefile` (writes `out/hello.txt`), `makelink` (a symbolic link `out/link` to `/etc/passwd`), `recall` (the
 prompts its task has had, so you can see a resumed session remember) and `forget` (deletes its task, so that
-resuming it fails). Like Bob it keeps its task on disk and offers `session/resume` and Bob's task export and
+resuming it fails). To a compaction it answers `Summary: ` and its task's prompts (with `slow` in the
+instructions, it runs until stopped instead). Like Bob it keeps its task on disk and offers `session/resume` and Bob's task export and
 import.
 
 On your laptop, `scripts/init-ui-config.sh` prepares `~/.bobcrew/` from [`ui.template/`](ui.template/README.md)
@@ -481,11 +484,20 @@ written by the session's own (non-root) user, so they land only where the agent 
 never through a symbolic link. Every upload shows in the conversation with who made it. The limit is
 `bobcrew.max-upload-size` (200 MB) per file; `BOBCREW_FILE_UPLOADS_ENABLED=false` turns uploads off.
 
-## Stopping, clearing and container metrics
+## Stopping, compacting, clearing and container metrics
 
 **Stop** in a session's header asks the agent to end its turn. It stays usable after a turn ended while the agent
 still sends work it started (Bob can leave a command running past its turn). A turn has no time limit unless the
 server sets one (`BOBCREW_PROMPT_TIMEOUT`); when it passes, the agent is asked to stop and the transcript says so.
+
+**Compact** in a session's header frees the agent's context window without losing the thread, like Bob Shell's
+`/compact` in its terminal (which Bob does not offer over ACP; on its own, Bob compacts only when the context is
+90% full). You may give instructions for the summary. The agent writes a summary of the conversation, with Bob's
+own template, as a turn of its own that you see in the transcript and can stop. Then it goes on in a new agent
+session (for Bob, a new task) in the same container, in the same mode. The summary goes before your next prompt,
+with the notes a first prompt carries (repository, secrets, file links). The transcript keeps everything. If the
+summary is stopped or fails, the conversation goes on as before. The summary waits in the server's memory until
+your next prompt, so archiving the session in between loses it.
 
 **Clear** in a session's header starts the conversation over in the same container. It asks whether to
 keep the workspace's files (useful when the agent has cloned a repository there) or delete them.
@@ -728,6 +740,7 @@ Keycloak user without the access role.
 | `POST /sessions/{id}/prompt` `{"text": "..."}` | Starts a turn; progress arrives as events |
 | `POST /sessions/{id}/cancel` | Stops the running turn. When idle it still sends the agent `session/cancel`, for work it started that outlives the turn (Bob can end a turn while a command it started goes on) |
 | `POST /sessions/{id}/clear` `{"wipeWorkspace": true}` | Starts the conversation over (a fresh agent session in the same container, earlier events forgotten); the session stays open. Deletes everything in the workspace unless `wipeWorkspace` is `false` (the body is optional). Only when idle (409 otherwise) |
+| `POST /sessions/{id}/compact` `{"instructions": "..."}` | Compacts the conversation: the agent writes a summary (a turn, streamed as events between `compacting` and `compacted`), then goes on from it in a new agent session; the transcript stays. The body is optional. Answers 202; only when idle (409 otherwise). If the summary is stopped or fails, an `error` event says so and nothing changes |
 | `POST /sessions/{id}/mode` `{"modeId": "..."}` | Switches the agent's mode |
 | `POST /sessions/{id}/permissions` `{"toolCallId": "...", "optionId": "..."}` | Answers a permission request (the tool call id is in the body because agents' ids can contain `/`) |
 | `GET /sessions/{id}/events?after=<seq>` | Server-Sent Events: the session's events after `seq`, then new ones |
@@ -750,7 +763,7 @@ bodies are limited to 2 MB.
 Each event is `{"seq", "time", "type", "user", "data"}`. Types: `update` (`data` is the ACP
 `session/update` as the agent sent it), `user_prompt`, `permission_request`,
 `permission_resolved`, `turn_end`, `status`, `error`, `cleared` (the session was cleared: the server dropped all earlier events, and a client shows an empty transcript from here; `data.workspaceWiped` says whether the files went too), `file_uploaded` (`user` uploaded `data.path`, `data.size` bytes), `repository_cloned` (`data.url`, `data.branch`, `data.path`), `shared` (`user` shared the session with
-`data.users`, the whole new list), `secrets_refreshed` (`user` replaced the values of the secrets `data.names`), `user_profile_refreshed` (`user` re-sent `data.count` user profile files), `resumed` (`user` started the agent again: `data.from` is `crash` or `archive`). The server keeps the last 5000 events of a
+`data.users`, the whole new list), `secrets_refreshed` (`user` replaced the values of the secrets `data.names`), `user_profile_refreshed` (`user` re-sent `data.count` user profile files), `resumed` (`user` started the agent again: `data.from` is `crash` or `archive`), `compacting` (`user` asked for a compaction, with `data.instructions` if any; the agent's summary follows as a turn, without a `user_prompt`), `compacted` (the agent goes on from that summary in a new session). The server keeps the last 5000 events of a
 session, so a client can reconnect with `after` (or `Last-Event-ID`) and miss nothing.
 
 ## Not in this version
@@ -760,7 +773,8 @@ agent containers), stateless coordinators and a small metadata store; `SessionMa
 for that. Also not done yet: renewing GitHub tokens without a person (a GitHub App whose
 8-hour user tokens the UI would refresh and send to its sessions), cloning over ssh, re-cloning after a wipe,
 resuming the sessions of a server that restarted, workspaces that outlive their
-session or are shared between sessions, pulling images, per-session network policies, metrics history,
+session or are shared between sessions, pulling images, usage and cost figures (Bob Shell 2.1.0 reports
+neither over ACP: no `usage_update`; its costs are only in its own task database), per-session network policies, metrics history,
 capabilities without a privileged container (with a runtime such as Sysbox), a UI shared by many users (each
 runs their own), Keycloak with PostgreSQL in the scripts.
 

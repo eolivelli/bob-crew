@@ -152,6 +152,19 @@ function resumedText(event) {
   return `${who} resumed the session`;
 }
 
+// The one-line description of a compacting event: who asked for the conversation to be compacted, and how. The
+// agent's summary follows as its answer.
+function compactingText(event) {
+  const instructions = event.data && event.data.instructions;
+  return `${event.user || 'someone'} asked to compact the conversation; the agent writes a summary`
+    + (instructions ? ` (instructions: ${instructions})` : '');
+}
+
+// The one-line description of a compacted event: the agent goes on from the summary above, in a new session.
+function compactedText(event) {
+  return `conversation compacted by ${event.user || 'someone'}: the agent goes on from the summary above`;
+}
+
 // The marker for a turn_end event, shown for every turn, so that anything the agent sends later is visibly
 // outside the turn; the page uses it too.
 function turnEndText(stopReason) {
@@ -266,6 +279,13 @@ function transcriptItems(events) {
         break;
       case 'resumed':
         items.push({ type: 'divider', time: event.time, text: resumedText(event) });
+        break;
+      case 'compacting':
+        streaming = null;
+        items.push({ type: 'divider', time: event.time, text: compactingText(event) });
+        break;
+      case 'compacted':
+        items.push({ type: 'divider', time: event.time, text: compactedText(event) });
         break;
       case 'user_profile_refreshed': {
         const count = event.data && event.data.count != null ? event.data.count : '?';

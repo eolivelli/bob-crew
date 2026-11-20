@@ -80,7 +80,7 @@ To try a change by hand, follow "Quick start" in the README with the fake agent'
 | `SessionController` | The whole HTTP API, including the SSE stream. Thin: validates input, calls `SessionManager` with the request's `Caller`. |
 | `Caller`, `CallerFactory`, `CallerAuthentication`, `CallerArgumentResolver` | Who makes a request and what they may do: name, admin, allowed capabilities, limits. `CallerFactory` makes it from a checked token: from `issue-token`'s as before Keycloak, from Keycloak's by roles and limit claims (bounded by the server's settings and ceilings). |
 | `SessionManager` | The only entry point the API uses. Owns the in-memory session map, the session limits (in all and per user), the image allowlist, idle cleanup, shutdown, and the checks on client-supplied environment variables, secrets and user profile files (`checkUserProfile`). |
-| `AgentSession` | One agent container and its ACP session: start (with the repository clone, then user profile files and secrets written before the agent runs), secrets refresh, prompt (the first one carries the environment notes), cancel, mode, permissions, clear, metrics, file reads and uploads, close, crash detection. |
+| `AgentSession` | One agent container and its ACP session: start (with the repository clone, then user profile files and secrets written before the agent runs), secrets refresh, prompt (the first one carries the environment notes), cancel, mode, permissions, clear, compact, metrics, file reads and uploads, close, crash detection. |
 | `DockerRuntime` | The only class that talks to Docker: creates the sessions' network (inter-container traffic off) and containers (hardened, labelled, never pulling; privileged ones only for allowed capabilities), attaches, execs as the session's user (workspace wipe, file writes, `git clone` through the image's entrypoint), stats, copies files out, writes user profile files and secrets (again on a refresh, then `applyProfile` runs the image's `profile.d` once more), removes; removes this instance's leftover containers at startup and shutdown. |
 | `AllowedImages` | Which images a client may name (`bobcrew.docker.allowed-images` globs, plus the default image). |
 | `Capabilities`, `Resources` | What a session may run besides commands (`docker`, `libvirt`), checked against `bobcrew.allowed-capabilities`; and its memory and CPU limits, checked against the server's caps. |
@@ -197,6 +197,12 @@ see one transcript.
 - **SSE is written from the request thread** in a blocking loop (`SessionController.events`), not
   with `SseEmitter`. This relies on virtual threads being enabled. `EventLog.close()` must wake
   waiting readers, otherwise shutdown waits for the keepalive interval.
+- **Compaction is ours, not Bob's**: Bob's ACP server has no `/compact` (a `/compact` prompt would reach the model
+  as text) and sends no usage figures. `AgentSession.compact` runs a summary turn with Bob's template
+  (`compactionPrompt`), collects the agent's message chunks while `compactionSummary` is set, then opens a new ACP
+  session (same mode) and keeps the summary in `compactNote` for the next prompt, with `firstPrompt` set again. The
+  status is RUNNING throughout, so nothing else gets in; any failure leaves the old ACP session in use. The fake
+  agent recognises the prompt by its first words (`FakeAcpAgent.COMPACTION`): keep the two in step.
 - **A turn has no time limit by default** (`bobcrew.prompt-timeout` is 0): an agent's turn can rightly take hours.
   When a limit is set and passes, the SDK fails the prompt and sends `$/cancel_request`, which Bob does not act on,
   so `AgentSession.onPromptTimeout` sends `session/cancel` as well; otherwise the session would say idle while the

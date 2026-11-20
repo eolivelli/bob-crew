@@ -290,6 +290,7 @@ function setStatus(status) {
   state.status = status;
   updateCancel();
   $('clear').disabled = status !== 'IDLE';
+  $('compact').disabled = status !== 'IDLE';
   $('restart').hidden = status !== 'FAILED';
   $('metrics-toggle').disabled = status === 'CLOSED';
   $('upload').disabled = !open || state.uploading;
@@ -477,6 +478,18 @@ function render(event) {
       state.inTurn = false;
       state.workAfterTurn = false;
       add(el('div', 'divider', resumedText(event)));
+      break;
+    case 'compacting':
+      // the agent's summary is a turn, without a prompt of the user's
+      state.streaming = null;
+      state.plan = null;
+      state.inTurn = true;
+      state.workAfterTurn = false;
+      updateCancel();
+      add(el('div', 'divider', compactingText(event)));
+      break;
+    case 'compacted':
+      add(el('div', 'divider', compactedText(event)));
       break;
     case 'user_profile_refreshed': {
       const count = event.data && event.data.count != null ? event.data.count : '?';
@@ -784,6 +797,24 @@ $('clear-dialog').addEventListener('close', async () => {
   try {
     await api('POST', sessionApi('/clear'), { wipeWorkspace: choice === 'wipe' });
     refreshSessions(); // the agent's modes start over
+  } catch (e) {
+    notify(e.message);
+  }
+});
+
+$('compact').addEventListener('click', () => {
+  if (!currentSession()) return;
+  const dialog = $('compact-dialog');
+  $('compact-instructions').value = '';
+  dialog.returnValue = 'cancel';
+  dialog.showModal();
+});
+
+$('compact-dialog').addEventListener('close', async () => {
+  if ($('compact-dialog').returnValue !== 'compact') return;
+  const instructions = $('compact-instructions').value.trim();
+  try {
+    await api('POST', sessionApi('/compact'), instructions ? { instructions } : {});
   } catch (e) {
     notify(e.message);
   }

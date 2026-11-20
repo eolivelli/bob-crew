@@ -89,6 +89,9 @@ class SessionController {
     record ClearRequest(Boolean wipeWorkspace) {
     }
 
+    record CompactRequest(String instructions) {
+    }
+
     record PromptRequest(String text) {
     }
 
@@ -313,6 +316,21 @@ class SessionController {
             Caller caller) {
         boolean wipe = request == null || request.wipeWorkspace() == null || request.wipeWorkspace();
         return sessions.clear(caller, id, wipe);
+    }
+
+    /**
+     * Compacts the conversation: the agent writes a summary of it (as a turn, streamed like any other), then goes on
+     * from the summary in a new session. The body may give {@code {"instructions": "..."}} for the summary.
+     */
+    @PostMapping("/sessions/{id}/compact")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    void compact(@PathVariable String id, @RequestBody(required = false) CompactRequest request, Caller caller) {
+        String instructions = request == null || request.instructions() == null || request.instructions().isBlank()
+                ? null : request.instructions().strip();
+        if (instructions != null && instructions.length() > MAX_PROMPT_LENGTH) {
+            throw new ApiException(HttpStatus.CONTENT_TOO_LARGE, "The instructions are too long");
+        }
+        sessions.compact(caller, id, instructions);
     }
 
     @PostMapping("/sessions/{id}/mode")

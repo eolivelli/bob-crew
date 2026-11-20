@@ -115,6 +115,22 @@ const resumedHtml = ctx.buildTranscriptHtml({ title: 't', id: 'x', owner: 'o', i
 assert(resumedHtml.includes('resumed the session from its archive'));
 assert(!resumedHtml.includes('<script>alert(1)'), 'the user name is escaped');
 
+// a compaction says who asked for it, with their instructions, then that the agent goes on from the summary
+assert.strictEqual(ctx.compactingText({ user: 'alice', data: { instructions: 'keep the tests' } }),
+  'alice asked to compact the conversation; the agent writes a summary (instructions: keep the tests)');
+assert.strictEqual(ctx.compactingText({ data: {} }), 'someone asked to compact the conversation; the agent writes a summary');
+assert.strictEqual(ctx.compactedText({ user: 'bob' }),
+  'conversation compacted by bob: the agent goes on from the summary above');
+const compactedHtml = ctx.buildTranscriptHtml({ title: 't', id: 'x', owner: 'o', image: 'i' }, [
+  ev(1, 'compacting', { instructions: '<b>keep</b>' }, 'alice'),
+  ev(2, 'update', { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Summary: all' } }),
+  ev(3, 'turn_end', { stopReason: 'end_turn' }),
+  ev(4, 'compacted', { summaryLength: 12 }, 'alice')], { user: 'u', when: new Date('2026-11-13T10:00:00Z') });
+assert(compactedHtml.includes('asked to compact the conversation'));
+assert(compactedHtml.includes('Summary: all'));
+assert(compactedHtml.includes('conversation compacted by alice'));
+assert(!compactedHtml.includes('<b>keep</b>'), 'the instructions are escaped');
+
 // what a copy button puts on the clipboard for a box of several parts
 assert.strictEqual(ctx.joinParts(['Run tests', null, '', '  \n', 'mvn test\n', undefined, 'BUILD SUCCESS\n\n']),
   'Run tests\n\nmvn test\n\nBUILD SUCCESS');
